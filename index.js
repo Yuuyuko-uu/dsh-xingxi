@@ -1888,48 +1888,52 @@ export function apply(ctx, 配置 = {}) {
     return 项 ? 项.目录 : ''
   }
 
-  /** 档案里的所有 md（本机那两个文件 + 会话文件夹里的） */
+  /** 档案里的所有 md：会话绑了文件夹就只读它，没绑才读本机那两份 */
   const 所有档案 = (sid) => {
     const 出 = []
-    for (const p of 本机文件()) {
-      try {
-        出.push({ 名: basename(p, '.md'), 路: p, 文: readFileSync(p, 'utf8') })
-      } catch {}
-    }
-    // ⚠ 两处都要试：列会话 找不到时（比如会话还没进列表），就直接查绑定表
-    let 夹 = 会话文件夹(sid)
+    let 夹 = ''
+    try {
+      夹 = 会话文件夹(sid)
+    } catch {}
     if (!夹 || !existsSync(夹)) {
       try {
         const 绑 = 读存配置().绑定 || {}
         if (绑[sid] && existsSync(绑[sid])) 夹 = String(绑[sid])
       } catch {}
     }
-    if (夹 && existsSync(夹)) {
-      const 走 = (目录, 前缀) => {
-        let 项们 = []
+    // 没有自己的文件夹 → 用本机档案
+    if (!夹 || !existsSync(夹)) {
+      for (const p of 本机文件()) {
         try {
-          项们 = readdirSync(目录, { withFileTypes: true })
-        } catch {
-          return
-        }
-        for (const d of 项们) {
-          if (d.isDirectory()) {
-            if (/^(\.|备份|备注)/.test(d.name)) continue
-            走(join(目录, d.name), (前缀 ? 前缀 + '/' : '') + d.name)
-            continue
-          }
-          if (!d.name.toLowerCase().endsWith('.md')) continue
-          try {
-            出.push({
-              名: (前缀 ? 前缀 + '/' : '') + basename(d.name, '.md'),
-              路: join(目录, d.name),
-              文: readFileSync(join(目录, d.name), 'utf8'),
-            })
-          } catch {}
-        }
+          出.push({ 名: basename(p, '.md'), 路: p, 文: readFileSync(p, 'utf8') })
+        } catch {}
       }
-      走(夹, '')
+      return 出
     }
+    const 走 = (目录, 前缀) => {
+      let 项们 = []
+      try {
+        项们 = readdirSync(目录, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const d of 项们) {
+        if (d.isDirectory()) {
+          if (/^(\.|备份|备注)/.test(d.name)) continue
+          走(join(目录, d.name), (前缀 ? 前缀 + '/' : '') + d.name)
+          continue
+        }
+        if (!/\.(md|txt)$/i.test(d.name)) continue
+        try {
+          出.push({
+            名: (前缀 ? 前缀 + '/' : '') + basename(d.name, '.md'),
+            路: join(目录, d.name),
+            文: readFileSync(join(目录, d.name), 'utf8'),
+          })
+        } catch {}
+      }
+    }
+    走(夹, '')
     return 出
   }
 
@@ -2137,31 +2141,59 @@ export function apply(ctx, 配置 = {}) {
           try {
             const sid = String((exec && exec.sessionId) || '')
             const 档 = 所有档案(sid)
-            const 限 = Math.max(500, Math.min(20000, Number((args && args.最多字) || 4000)))
+            const 限 = Math.max(600, Math.min(20000, Number((args && args.最多字) || 4000)))
             const 词 = String((args && args.关键词) || '').trim()
             const 日 = String((args && args.日期) || '').trim()
             const 名 = String((args && args.文件) || '').trim()
 
-            let 们 = 档
-            if (名) 们 = 们.filter((f) => f.名.includes(名) || f.路.includes(名))
+            if (!档.length) {
+              return { ok: false, text: '这个会话还没有档案（先去星坊里指定文件夹）' }
+            }
+
+            // 把文件按「一类一份」归拢，方便说清楚有什么
+            const 分组 = { 记忆卡: [], 日记: [], 原始对话: [], 其他: [] }
+            for (const f of 档) {
+              if (/^日记\//.test(f.名)) 分组.日记.push(f)
+              else if (/^原始对话\//.test(f.名)) 分组.原始对话.push(f)
+              else if (/记忆卡/.test(f.名)) 分组.记忆卡.push(f)
+              else 分组.其他.push(f)
+            }
+            const 日期们 = 分组.日记.map((f) => (/(\d{4}-\d{2}-\d{2})/.exec(f.名) || [])[1]).filter(Boolean).sort()
+
+            // ── 0. 什么都不给：给索引（在外面先看清有什么，再决定钻哪一天）──
+            if (!词 && !日 && !名) {
+              const 行们 = ['这个档案里有 ' + 档.length + ' 个文件：', '']
+              for (const f of 分组.记忆卡) {
+                行们.push('· ' + f.名 + '（' + Math.round(f.文.length / 1000) / 10 + ' 万字）')
+              }
+              for (const f of 分组.其他) 行们.push('· ' + f.名 + '（' + f.文.length + ' 字）')
+              if (日期们.length) {
+                行们.push(
+                  '· 日记 ' + 日期们.length + ' 天：' + 日期们[0] + ' ~ ' + 日期们[日期们.length - 1] + '（一天一个文件）',
+                )
+              }
+              if (分组.原始对话.length) {
+                const 原日 = 分组.原始对话
+                  .map((f) => (/(\d{4}-\d{2}-\d{2})/.exec(f.名) || [])[1])
+                  .filter(Boolean)
+                  .sort()
+                行们.push('· 原始对话 ' + 原日.length + ' 天：' + 原日[0] + ' ~ ' + 原日[原日.length - 1] + '（当天原话）')
+              }
+              行们.push('', '怎么查：给「关键词」全文搜（日记也会搜）；给「日期」看那一天；给「文件」看整篇。')
+              return { ok: true, text: 行们.join(String.fromCharCode(10)) }
+            }
+
+            // ── 1. 日期：直接定位那一天的日记（不用挨个翻）──
             if (日) {
-              // ⚠ 日记里写的是 `- **08-26 周X**：`，没有年份 —— 拿 2026-08-26 去比会一条都不中
               const 短 = 日.length >= 10 ? 日.slice(5) : 日
-              const 命中 = 们.filter((f) => f.名.includes(日) || f.文.includes(日) || f.文.includes(短))
-              if (命中.length) 们 = 命中
-            }
-            if (!们.length) {
-              记一笔('xingxi_read 没找到：sid=' + sid + ' 档=' + 档.length + ' 名=' + 名 + ' 日=' + 日 + ' 词=' + 词)
-              return { ok: false, text: '档案里没有匹配：' + (名 || 日 || 词) + '（翻了 ' + 档.length + ' 个文件）' }
-            }
-
-            const 出 = []
-            let 总 = 0
-
-            // 按日期问：只给那一天的日记条目
-            if (日 && !词) {
-              const 短 = 日.length >= 10 ? 日.slice(5) : 日
-              for (const f of 们) {
+              const 目标 = 档.filter((f) => f.名.includes(日) || f.名.includes(短))
+              if (目标.length) {
+                const 段 = 目标.slice(0, 3).map((f) => '【' + f.名 + '】' + String.fromCharCode(10) + f.文.slice(0, 限))
+                return { ok: true, text: 段.join(String.fromCharCode(10, 10)).slice(0, 限) }
+              }
+              // 没有那天的文件 → 在全文里找那天的条目
+              const 出 = []
+              for (const f of 档) {
                 const 行们 = f.文.split(String.fromCharCode(10))
                 const 块 = []
                 let 收 = false
@@ -2171,47 +2203,58 @@ export function apply(ctx, 配置 = {}) {
                   if (新条) 收 = t.includes(短) || t.includes(日)
                   if (收) 块.push(l)
                 }
-                if (块.length) {
-                  const 段 = '【' + f.名 + '】' + String.fromCharCode(10) + 块.join(String.fromCharCode(10))
-                  出.push(段)
-                  总 += 段.length
-                }
+                if (块.length) 出.push('【' + f.名 + '】' + String.fromCharCode(10) + 块.join(String.fromCharCode(10)))
               }
-              if (!出.length) {
-                // 那天真没有 → 给最后三条并说明
-                for (const f of 们) {
-                  const 段 = '【' + f.名 + '】（' + 日 + ' 没有记录，给你最后三条）' + String.fromCharCode(10) + 取近几天(f.文, 3)
-                  出.push(段)
-                  总 += 段.length
-                  if (总 >= 限) break
-                }
+              if (出.length) return { ok: true, text: 出.join(String.fromCharCode(10, 10)).slice(0, 限) }
+              return {
+                ok: false,
+                text: 日 + ' 没有记录。日记范围：' + (日期们.length ? 日期们[0] + ' ~ ' + 日期们[日期们.length - 1] : '没有日记'),
               }
-              return { ok: true, text: 出.join(String.fromCharCode(10, 10)).slice(0, 限) }
             }
 
-            // 按关键词
-            if (词) {
-              for (const f of 们) {
-                const 行们 = f.文.split(String.fromCharCode(10))
-                for (let i = 0; i < 行们.length; i++) {
-                  if (!行们[i].includes(词)) continue
-                  const 段 = '【' + f.名 + '】' + String.fromCharCode(10) +
-                    行们.slice(Math.max(0, i - 2), Math.min(行们.length, i + 4)).join(String.fromCharCode(10))
-                  if (总 + 段.length > 限) break
-                  出.push(段)
-                  总 += 段.length
-                }
-                if (总 >= 限) break
-              }
-              return { ok: true, text: 出.length ? 出.join(String.fromCharCode(10, 10)) : '没有「' + 词 + '」' }
+            // ── 2. 文件名：给整篇 ──
+            if (名 && !词) {
+              const 目标 = 档.filter((f) => f.名.includes(名) || f.路.includes(名))
+              if (!目标.length) return { ok: false, text: '没有这个文件：' + 名 }
+              const 段 = 目标.slice(0, 2).map((f) => '【' + f.名 + '】' + String.fromCharCode(10) + f.文.slice(0, 限))
+              return { ok: true, text: 段.join(String.fromCharCode(10, 10)).slice(0, 限) }
             }
 
-            // 只给文件名：给整篇（截到上限）
-            for (const f of 们) {
-              const 段 = '【' + f.名 + '】' + String.fromCharCode(10) + f.文.slice(0, Math.max(0, 限 - 总))
+            // ── 3. 关键词：全文搜，**每个文件都看**，每个文件最多取 2 段 ──
+            //   ⚠ 以前是按文件顺序扫、扫到预算用完就停 —— 记忆卡一大就把日记挤没了。
+            const 命中 = []
+            for (const f of 档) {
+              const 行们 = f.文.split(String.fromCharCode(10))
+              let 次 = 0
+              const 段们 = []
+              for (let i = 0; i < 行们.length; i++) {
+                if (!行们[i].includes(词)) continue
+                次++
+                if (段们.length < 2) {
+                  段们.push(行们.slice(Math.max(0, i - 2), Math.min(行们.length, i + 4)).join(String.fromCharCode(10)))
+                }
+              }
+              if (次) 命中.push({ 名: f.名, 次, 段们 })
+            }
+
+            if (!命中.length) {
+              记一笔('xingxi_read 没找到：sid=' + sid + ' 档=' + 档.length + ' 词=' + 词)
+              return { ok: false, text: '档案里没有「' + 词 + '」（翻了 ' + 档.length + ' 个文件）' }
+            }
+
+            命中.sort((x, y) => y.次 - x.次)
+            const 总次 = 命中.reduce((s, x) => s + x.次, 0)
+            const 头 = '「' + 词 + '」在 ' + 命中.length + ' 个文件里出现 ' + 总次 + ' 次：'
+            const 出 = [头]
+            let 总 = 头.length
+            for (const h of 命中) {
+              const 段 = '【' + h.名 + '】（' + h.次 + ' 处）' + String.fromCharCode(10) + h.段们.join(String.fromCharCode(10, 10))
+              if (总 + 段.length > 限) {
+                出.push('…还有 ' + (命中.length - 出.length + 1) + ' 个文件也提到，想看就给「文件」参数点名')
+                break
+              }
               出.push(段)
               总 += 段.length
-              if (总 >= 限) break
             }
             return { ok: true, text: 出.join(String.fromCharCode(10, 10)) }
           } catch (e) {
