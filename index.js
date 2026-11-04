@@ -630,18 +630,27 @@ export function 读会话(会话id) {
 }
 
 /** 按天分好，凡是「已整理到」之后的日子 */
-export function 按天切(会话id, 已整理到 = '') {
+/**
+ * @param {number} 已到 水位（毫秒）：只要 **时间戳比它晚** 的事件。
+ *   ⭐ 0.2.2：「已整理到」是按天跳的，同一天里后来聊的内容会永远进不来；
+ *   有了水位，一趟只取上次之后的新内容，所以「补星」才能只补尾巴。
+ */
+export function 按天切(会话id, 已整理到 = '', 已到 = 0) {
   const { 事件, 缺 } = 读会话(会话id)
   const 按天 = new Map()
+  let 最后时 = 0
   for (const e of 事件) {
     if (已整理到 && e.日 <= 已整理到) continue
+    if (已到 && Number(e.时 || 0) <= Number(已到)) continue
     if (!按天.has(e.日)) 按天.set(e.日, [])
     按天.get(e.日).push(e)
+    if (Number(e.时 || 0) > 最后时) 最后时 = Number(e.时 || 0)
   }
   const 日们 = [...按天.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
   return {
     缺,
     全部事件: 事件.length,
+    最后时,
     天数: 日们.length,
     最早: 日们.length ? 日们[0][0] : '',
     最晚: 日们.length ? 日们[日们.length - 1][0] : '',
@@ -964,21 +973,35 @@ export function 查重章(文) {
  * 没有料（还没切过）就退回老办法：日记最大 + 账本取大的。
  */
 export function 算进度(文件夹) {
-  // ① 料里有哪些天
+  // ① 有哪些天：看**原始对话/**（永久留一份），料 只是本批的临时目录，不能拿来算进度
   const 料天 = []
-  try {
-    for (const f of readdirSync(join(文件夹, '.拾星', '料'))) {
-      const m = /^(\d{4}-\d{2}-\d{2})\.txt$/i.exec(f)
-      if (m) 料天.push(m[1])
-    }
-  } catch {}
+  const 收天 = (夹) => {
+    try {
+      for (const f of readdirSync(夹)) {
+        const m = /(\d{4}-\d{2}-\d{2})\.txt$/i.exec(f)
+        if (m) 料天.push(m[1])
+      }
+    } catch (e) {}
+  }
+  收天(join(文件夹, '原始对话'))
+  if (!料天.length) 收天(join(文件夹, '.拾星', '料'))
   料天.sort()
   // ② 日记里有那些天
   const 有日记 = new Set()
   try {
     for (const f of readdirSync(join(文件夹, '日记'))) {
       const m = /(\d{4}-\d{2}-\d{2})/.exec(f)
-      if (m) 有日记.add(m[1])
+      if (!m) continue
+      // ⚠ 只有「占位」的日记不算写过：`（晚上再补）` 这种，字数少得可怜
+      try {
+        const 正文 = String(readFileSync(join(文件夹, '日记', f), 'utf8') || '')
+          .replace(/^#.*$/gm, '')
+          .replace(/[\s\-*_`>#（）()]/g, '')
+        if (正文.length < 40) continue
+      } catch (e) {
+        continue
+      }
+      有日记.add(m[1])
     }
   } catch {}
   if (料天.length) {
@@ -987,7 +1010,14 @@ export function 算进度(文件夹) {
       if (!有日记.has(d)) break
       进度 = d
     }
-    return 进度
+    // ⚠ 账本里记的「已整理到」是**跑成功时插件自己写的**，比看文件猜更可信：
+    //   文件可能被手改、日记可能是短句占位，猜低了就会让「接着拾」把做完的天重做一遍。
+    let 账面 = ''
+    try {
+      const 账 = JSON.parse(readFileSync(join(文件夹, '.xingxi.json'), 'utf8'))
+      账面 = String((账 && 账.已整理到) || '')
+    } catch (e) {}
+    return 账面 > 进度 ? 账面 : 进度
   }
   // ③ 没有料：老办法
   let 最大 = ''
@@ -1001,12 +1031,25 @@ export function 算进度(文件夹) {
 }
 
 /** 把按天的料落成文本文件 */
-export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0) {
-  const 切 = 按天切(会话id, 已整理到)
+export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0, 已到 = 0) {
+  const 切 = 按天切(会话id, 已整理到, 已到)
   if (!切.料.length) return { ok: false, 原因: 切.缺[0] || '没有可整理的日子' }
   // ⭐ 一次只切前面几天（批天数）：一个会话塞太多天，它读到第三天就不干了
   const 全天 = 切.料.map(([日]) => 日)
-  const 用 = 最多天 > 0 ? 切.料.slice(0, 最多天) : 切.料
+  // ⚠ 已经有真日记的那天直接跳过：进度账不准（老版本没写账本、手改过文件）时也不会重做
+  const 真日记 = (日) => {
+    try {
+      const 文 = String(readFileSync(join(文件夹, '日记', 日 + '.md'), 'utf8') || '')
+        .replace(/^#.*$/gm, '')
+        .replace(/[\s\-*_`>#（）()]/g, '')
+      return 文.length >= 40
+    } catch (e) {
+      return false
+    }
+  }
+  const 可做 = 切.料.filter(([日]) => !真日记(日))
+  if (!可做.length) return { ok: false, 原因: '剩下这些天都已经写过日记了' }
+  const 用 = 最多天 > 0 ? 可做.slice(0, 最多天) : 可做
   const 料目录 = join(文件夹, '.拾星', '料')
   try {
     mkdirSync(料目录, { recursive: true })
@@ -1034,6 +1077,8 @@ export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0)
       mkdirSync(原文夹, { recursive: true })
       const 原路 = join(原文夹, 日 + '.txt')
       if (!existsSync(原路)) writeFileSync(原路, 文, 'utf8')
+      // ⭐ 0.2.2：同一天后来又聊了（补星）→ **追加**，不覆盖前面已经留好的原文
+      else if (已到) appendFileSync(原路, String.fromCharCode(10) + '── 之后 ──' + String.fromCharCode(10) + 文, 'utf8')
     } catch (e) {
       return { ok: false, 原因: '写不了料：' + String((e && e.message) || e) }
     }
@@ -1074,6 +1119,7 @@ export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0)
     最晚: 用[用.length - 1] ? 用[用.length - 1][0] : '',
     总天数: 切.天数,
     全部最晚: 切.最晚,
+    最后时: Number(切.最后时 || 0),
     料目录,
   }
 }
@@ -1838,6 +1884,8 @@ function 活的标题们(活们, 想要) {
 // ═══════════════════════════════════════════════════════
 
 const 缓存 = new Map()
+// 星图缓存的有效期（毫秒）。太短＝每次切会话都重算；太长＝改完档案看不到变化
+const 缓存毫秒 = 8000
 
 function 文件签名们(目录) {
   let 串 = ''
@@ -1900,6 +1948,31 @@ export function 造共享桥(星们, 上限 = 400) {
 
 export function 出图(会话id, 活们 = []) {
   const 存的 = 读存配置()
+  // ⭐ 0.2.2：**先算签名、先查缓存**。
+  //   以前缓存比对放在「扫档案、造线、造桥」后面 —— 命中也要把重活白做一遍（实测 ~200ms，
+  //   而且这段是同步的，会把宿主线程卡住）。现在命中就直接返回，一点都不算。
+  let 快键 = ''
+  try {
+    if (会话id === '__本机__') {
+      let 字节 = 0
+      for (const p of [存的.记忆卡, 存的.日记]) {
+        if (!p) continue
+        try {
+          字节 += statSync(p).size
+        } catch (e) {}
+      }
+      快键 = '__本机__|' + (存的.记忆卡 || '') + '|' + (存的.日记 || '') + '|' + 字节
+    } else if (会话id) {
+      const 夹 = String((存的.绑定 || {})[会话id] || join(档案根, 会话id))
+      快键 = String(会话id) + '|' + 文件签名们(夹)
+    }
+  } catch (e) {
+    快键 = ''
+  }
+  const 快旧 = 缓存.get(会话id)
+  if (快键 && 快旧 && (快旧.快键 === 快键 || 快旧.键 === 快键) && Date.now() - 快旧.时 < 缓存毫秒) {
+    return 快旧.图
+  }
   const 列表 = 列会话(活们)
   // ⚠ 找不到就**别退回第一个**：那样会拿别人的图冒充，问题被藏起来（她看到「有星」其实不是这个会话）
   const 这项 = 列表.find((x) => x.id === 会话id) || null
@@ -1957,7 +2030,7 @@ export function 出图(会话id, 活们 = []) {
   }
 
   const 旧 = 缓存.get(会话id)
-  if (旧 && 旧.键 === 键 && Date.now() - 旧.时 < 4000) return 旧.图
+  if (旧 && 旧.键 === 键 && Date.now() - 旧.时 < 缓存毫秒) return 旧.图
 
   for (const s of 结果.星) {
     const 事件日 = 认事件日期(s)
@@ -1991,7 +2064,7 @@ export function 出图(会话id, 活们 = []) {
     },
     算于: Date.now(),
   }
-  缓存.set(这项 ? 这项.id : '', { 键, 时: Date.now(), 图 })
+  缓存.set(这项 ? 这项.id : '', { 键, 快键: 快键 || 键, 时: Date.now(), 图 })
   return 图
 }
 
@@ -2094,39 +2167,74 @@ export function apply(ctx, 配置 = {}) {
   const 日记已跑 = new Set()      // `${会话}|${日期}`
   const 日记在跑 = new Set()      // 正在递话的会话
 
+  const 昨天串 = (日) => {
+    try {
+      return new Date(Date.parse(String(日) + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10)
+    } catch (e) {
+      return ''
+    }
+  }
   const 今天串 = () => {
     const d = new Date()
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
   }
 
-  const 读日记设置 = (会话id) => {
+  /**
+   * ⭐ 0.2.2：一个会话一份「定时」，三个开关：
+   *   · 只更新记忆卡  —— 到点让拾星只写记忆卡
+   *   · 写日记        —— 到点**提醒这个会话自己**写日记（提醒，不是代写）
+   *   · 更新记忆卡 + 写日记 —— 到点让拾星连日记一起写（AI 写）
+   *   前面两个跟第三个互斥：上面是「你自己写」，下面是「AI 写」。
+   */
+  const 读定时设置 = (会话id) => {
     const 存 = 读存配置()
-    const w = 存.写日记 || {}
+    const w = 存.定时 || {}
     const 各 = w.各 && typeof w.各 === 'object' ? w.各 : {}
-    const 键 = String(会话id || '')
-    let 本 = 键 ? 各[键] : null
-    // 老配置（一份全局的 {开,时,分,会话}）→ 只算给当初那个会话，别人不受影响
-    if (!本 && 键 && String(w.会话 || '') === 键 && (w.开 !== undefined || w.时 !== undefined)) {
-      本 = { 开: w.开, 时: w.时, 分: w.分 }
-    }
-    本 = 本 || {}
+    const 本 = (会话id && 各[String(会话id)]) || {}
     return {
-      // ⚠ 默认**关**：每个会话要自己打开，不能因为别人开了给自己也开上
-      开: Boolean(本.开),
-      时: Math.max(0, Math.min(23, Number(本.时 ?? w.时 ?? 23))),
-      分: Math.max(0, Math.min(59, Number(本.分 ?? w.分 ?? 30))),
-      会话: 键,
+      时: Math.max(0, Math.min(23, Number(本.时 ?? 23))),
+      分: Math.max(0, Math.min(59, Number(本.分 ?? 30))),
+      // 老字段（只卡 / 提醒日记 / 连日记）往新字段上迁
+      自己: 本.自己 !== undefined ? Boolean(本.自己) : Boolean(本.只卡) || Boolean(本.提醒日记),
+      星汐: 本.星汐 !== undefined ? Boolean(本.星汐) : Boolean(本.连日记),
     }
   }
 
-  const 造日记提示词 = (文件夹, 日) => [
-    '到点了，今天的日记写一写吧。',
+  const 造日记提示词 = (文件夹, 日, 条数 = 0) => [
+    '到点了，今天的档案自己整理一下。',
+    ...(条数 ? ['今天的原始对话已经存了一份：' + join(文件夹, '原始对话', 日 + '.txt') + '（' + 条数 + ' 条）'] : []),
     '',
-    '放到这儿：' + join(文件夹, '日记', 日 + '.md'),
-    '（一天一个文件，就写今天这一天的）',
+    '日记：' + join(文件夹, '日记', 日 + '.md') + '（一天一个，只写今天）',
+    '记忆卡：' + join(文件夹, '记忆卡.md') + '（今天值得留的，加到对应章里）',
     '',
-    '想写什么写什么，不用跟我汇报。',
-  ].join('\n')
+    '写多少都行，不用跟我汇报。',
+  ].join(String.fromCharCode(10))
+
+  /** 把某一天的原始对话落到 原始对话/<日>.txt（有就追加）—— 两种拾星都要留这一份 */
+  const 存原始对话 = (文件夹, 会话id, 日) => {
+    try {
+      const 源 = 找源会话(文件夹) || 会话id
+      if (!源 || !日) return 0
+      const 切 = 按天切(源, 昨天串(日))
+      const 段 = (切.料 || []).find((x) => x[0] === 日)
+      if (!段 || !段[1] || !段[1].length) return 0
+      const 文 = 那天成文(日, 段[1])
+      const 夹 = join(文件夹, '原始对话')
+      mkdirSync(夹, { recursive: true })
+      const 路 = join(夹, 日 + '.txt')
+      if (!existsSync(路)) writeFileSync(路, 文, 'utf8')
+      else {
+        const 旧 = readFileSync(路, 'utf8')
+        const 头 = 文.slice(0, 200)
+        if (!旧.includes(头)) appendFileSync(路, String.fromCharCode(10) + '── 之后 ──' + String.fromCharCode(10) + 文, 'utf8')
+      }
+      记一笔('存原始对话：' + 日 + '（' + 段[1].length + ' 条）')
+      return 段[1].length
+    } catch (e) {
+      记一笔('存原始对话失败：' + String((e && e.message) || e))
+      return 0
+    }
+  }
 
   /** 到点后：派话 + 看它的日志把文件块收下来 */
   const 跑日记 = async (文件夹, 会话id, 日) => {
@@ -2135,12 +2243,13 @@ export function apply(ctx, 配置 = {}) {
       记一笔('写日记：会话没醒着（' + 会话id.slice(0, 20) + '），今天跳过')
       return
     }
+    const 条数 = 存原始对话(文件夹, 会话id, 日)
     记一笔('写日记：往会话递话 ' + 会话id.slice(0, 20))
     try {
       await agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text: 造日记提示词(文件夹, 日) }],
+        content: [{ type: 'text', text: 造日记提示词(文件夹, 日, 条数) }],
         source: { kind: 'plugin:xingxi-diary' },
       })
     } catch (e) {
@@ -2151,12 +2260,12 @@ export function apply(ctx, 配置 = {}) {
     // 没有兜底：它自己会写就写，不会写就是没写（不做「插件替它落盘」那一套）
   }
 
-  const 查日记 = () => {
+  const 查定时 = () => {
     const d = new Date()
     const 现在 = d.getHours() * 60 + d.getMinutes()
     const 日 = 今天串()
-    // 挨个会话看：谁自己开了、时间到了、今天还没写过
     const 夹们 = new Map()
+    const 名们 = new Map()
     try {
       const 绑 = 读存配置().绑定 || {}
       for (const [k, v] of Object.entries(绑)) if (k && v) 夹们.set(String(k), String(v))
@@ -2165,20 +2274,31 @@ export function apply(ctx, 配置 = {}) {
       for (const x of 列会话(活会话们())) {
         if (!x || !x.id || !x.目录) continue
         if (!夹们.has(String(x.id))) 夹们.set(String(x.id), String(x.目录))
+        名们.set(String(x.id), x.名 || '')
       }
     } catch (e) {}
     for (const [会话id, 文件夹] of 夹们) {
       if (!文件夹) continue
-      const 设 = 读日记设置(会话id)
-      if (!设.开) continue
+      const 设 = 读定时设置(会话id)
+      if (!设.自己 && !设.星汐) continue
       if (现在 < 设.时 * 60 + 设.分) continue
       const 键 = 会话id + '|' + 日
-      if (日记已跑.has(键) || 日记在跑.has(会话id)) continue
-      日记在跑.add(会话id)
-      跑日记(文件夹, 会话id, 日)
-        .then(() => 日记已跑.add(键))
-        .catch(() => {})
-        .finally(() => 日记在跑.delete(会话id))
+      if (日记已跑.has(键)) continue
+      日记已跑.add(键)
+      // ① 提醒它自己写日记（不是代写）
+      if (设.自己) {
+        跑日记(文件夹, 会话id, 日).catch(() => {})
+      }
+      // ② 让拾星去做（只卡 / 卡+日记），跟手动点「拾星」走同一条路
+      if (设.星汐) {
+        try {
+          派一批({ id: 会话id, 目录: 文件夹, 名: 名们.get(会话id) || '' }, { 只今天: true, 写日记: true })
+            .then((r) => 记一笔('定时拾星：' + (r && r.ok ? '派好了' : '没派：' + (r && r.原因))))
+            .catch((e) => 记一笔('定时拾星失败：' + String((e && e.message) || e)))
+        } catch (e) {
+          记一笔('定时拾星异常：' + String((e && e.message) || e))
+        }
+      }
     }
   }
 
@@ -2186,12 +2306,12 @@ export function apply(ctx, 配置 = {}) {
   try {
     const 定时服务 = typeof ctx.get === 'function' ? ctx.get('timer') : undefined
     if (定时服务 && typeof 定时服务.repeat === 'function') {
-      ctx.effect(() => 定时服务.repeat(查日记, 60 * 1000))
+      ctx.effect(() => 定时服务.repeat(查定时, 60 * 1000))
     } else {
-      const t = setInterval(查日记, 60 * 1000)
+      const t = setInterval(查定时, 60 * 1000)
       ctx.effect(() => () => clearInterval(t))
     }
-    记一笔('日记定时已挂（每分钟查一次）')
+    记一笔('定时已挂（每分钟查一次：提醒写日记 / 拾星）')
   } catch (e) {
     记一笔('日记定时挂不上：' + String((e && e.message) || e))
   }
@@ -2808,7 +2928,17 @@ export function apply(ctx, 配置 = {}) {
   const 节流毫秒 = 90 * 1000
   const 在跑 = new Map()   // 文件夹 → 开始时间
 
-  const 派一批 = async (项) => {
+  /** 账本里记的水位（毫秒）：上次整理到哪个时间点之后 */
+  const 读水位 = (文件夹) => {
+    try {
+      const 账 = JSON.parse(readFileSync(join(文件夹, '.xingxi.json'), 'utf8')) || {}
+      return Number(账.已到 || 0) || 0
+    } catch (e) {
+      return 0
+    }
+  }
+
+  const 派一批 = async (项, 选项 = {}) => {
     const 文件夹 = 项.目录
     const sid = 项.id
     if (!文件夹) return { ok: false, 原因: '这个会话还没有文件夹' }
@@ -2827,8 +2957,20 @@ export function apply(ctx, 配置 = {}) {
     try {
       旧任 = JSON.parse(readFileSync(任路, 'utf8')) || {}
     } catch {}
-    if (旧任.暂停) {
-      return { ok: false, 原因: '已经停了（连续 ' + (旧任.连续失败 || 0) + ' 次没进展），点「继续」才再派' }
+    // ⭐ 人亲手点的（拾星 / 补星）永远不算「已经停了」——那是给自动调度用的闸
+    const 手动 = Boolean(选项.手动)
+    if (旧任.暂停 && !手动) {
+      return { ok: false, 原因: '自动停下了（连续 ' + (旧任.连续失败 || 0) + ' 次没进展）' }
+    }
+    if (手动 && (旧任.暂停 || 旧任.手动停)) {
+      delete 旧任.暂停
+      delete 旧任.手动停
+      delete 旧任.暂停原因
+      旧任.连续失败 = 0
+      try {
+        writeFileSync(任路, JSON.stringify(旧任, null, 2), 'utf8')
+      } catch (e) {}
+      记一笔('手动派：清掉暂停标记（' + 文件夹 + '）')
     }
     if (Number(旧任.连续失败 || 0) >= 3) {
       try {
@@ -2859,7 +3001,15 @@ export function apply(ctx, 配置 = {}) {
     //   结果切出来的是「拾星刚开的那个空会话」，一天料都切不到（实测）。
     const 源 = 找源会话(文件夹) || sid
     const 已 = 算进度(文件夹)
-    const 料 = 准备料(源, 文件夹, 已, 批天数)
+    // ⭐ 0.2.2：补星 = 只切「水位之后」的内容（同一天的后半段也算得出来）
+    const 补 = Boolean(选项.补)
+    // ⭐ 0.2.2：定时 / 补星 **只处理今天** —— 不管前面积压多少天，永远只切当天那一段
+    const 只今天 = Boolean(选项.只今天) || 补
+    const 今天 = 今天串()
+    const 昨天 = new Date(Date.parse(今天 + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10)
+    const 水位 = 只今天 ? 读水位(文件夹) : 0
+    const 料 = 准备料(源, 文件夹, 只今天 ? 昨天 : 已, 批天数, 水位)
+    if (只今天 && !料.ok) return { ok: false, 原因: '今天还没有新内容' }
     记一笔('派一批：已到 ' + (已 || '开头') + ' ｜料 ' + JSON.stringify({ ok: 料.ok, 天数: 料.天数, 最早: 料.最早, 最晚: 料.最晚 }))
     if (!料.ok) return { ok: false, 原因: 料.原因 }
 
@@ -2881,7 +3031,7 @@ export function apply(ctx, 配置 = {}) {
         (模 ? 模.provider + '/' + 模.model : '（没取到）') +
         '（' + (存模 && 存模.provider ? '星坊选的' : 源模 ? '源会话' : '默认') + '）',
     )
-    const 提示词 = 造提示词({
+    let 提示词 = 造提示词({
       文件夹,
       会话名: 项.名,
       已整理到: 已,
@@ -2893,6 +3043,15 @@ export function apply(ctx, 配置 = {}) {
       //     连料都打不开，最后只能交空模板。跟 preset 里有没有文件工具有关，我们控制不了。）
       内联料: true,
     })
+    // ⭐ 0.2.2：只更新记忆卡的模式 —— 把「必须交日记」那几句换成「不交日记」
+    if (选项.写日记 === false) {
+      提示词 = 提示词
+        .split('**每一天都要交两块：一块记忆卡、一块日记。少一块都不算交。**').join('**本次只更新记忆卡：只交记忆卡块，绝对不要交日记块。**')
+        .split('<<<文件 日记/2026-11-03.md>>>').join('<<<文件 记忆卡.md#五>>>')
+        .split('那一天发生了什么（几百字）').join('- 这一条要往「五｜我们的约定」里加的内容')
+        .split('- **记忆卡那块最容易漏**：只交日记不交记忆卡 = 没交。哪怕那天只有一条，也要交。').join('- 每个要动的章各交一块记忆卡；哪怕只有一条，也要交。')
+      + String.fromCharCode(10) + String.fromCharCode(10) + '⚠ 这次**不要生成任何日记文件**，交卷里只有记忆卡块。'
+    }
 
     // 读出这一批的料（按天），后面分条贴过去
     const 料块们 = []
@@ -2976,8 +3135,11 @@ export function apply(ctx, 配置 = {}) {
         const 旧 = JSON.parse(readFileSync(任路, 'utf8')) || {}
         if (成) {
           旧.连续失败 = 0
-          旧.暂停 = false
-          delete 旧.暂停原因
+          // ⚠ 手写的「手动停」不许被收工清掉，不然一收工它就又自己跑起来了
+          if (!旧.手动停) {
+            旧.暂停 = false
+            delete 旧.暂停原因
+          }
         } else {
           旧.连续失败 = Number(旧.连续失败 || 0) + 1
           if (旧.连续失败 >= 3) {
@@ -3000,6 +3162,18 @@ export function apply(ctx, 配置 = {}) {
     //     · 还在出消息 → 一直等
     //     · 连续 3 分钟没新消息，且进度到了 → 收工
     //     · 连续 3 分钟没新消息、进度没动 → 催它一次；催两次还没动就放手（会话不杀）
+    // ⭐ 0.2.2：随时可以停 —— 每轮都看任务.json 的暂停标记（停止按钮 / 手写都算）
+    const 被叫停 = () => {
+      try {
+        const t = JSON.parse(readFileSync(任路, 'utf8')) || {}
+        return Boolean(t.暂停)
+      } catch (e) {
+        return false
+      }
+    }
+    // ⚠ 料还没发完就不许判「到齐」——实测：料是分几条消息贴的，
+    //   它可能只看到任务说明就回一句「料还没贴过来」，那时收工等于什么都收不到
+    let 料发完 = false
     const 已处理 = new Set()
     let 上次签名 = ''
     let 静了几次 = 0
@@ -3013,6 +3187,18 @@ export function apply(ctx, 配置 = {}) {
       }
     }
     const 卡前时间 = 卡后时间()
+    // ⭐ 0.2.2：补星/定时是「只今天」，那一天可能早就被算成整理过了 ——
+    //   所以收工不能只看进度，得看它**真的写过东西**（记忆卡或今天的日记动过）
+    const 今天日记路 = () => join(文件夹, '日记', String(料.最晚 || '') + '.md')
+    const 日记时间 = () => {
+      try {
+        return statSync(今天日记路()).mtimeMs
+      } catch (e) {
+        return 0
+      }
+    }
+    const 日记前时间 = 日记时间()
+    const 有动静 = () => 卡后时间() !== 卡前时间 || 日记时间() !== 日记前时间
 
     const 读它说的 = async () => {
       let 文 = ''
@@ -3047,6 +3233,7 @@ export function apply(ctx, 配置 = {}) {
     }
 
     const 轮 = async () => {
+      // （料发完之前轮也会跑，但上面那道闸会挡住收工）
       const 文 = await 读它说的()
       const 签名 = 文 ? 文.length + ':' + 文.slice(-120) : ''
       if (签名 && 签名 !== 上次签名) {
@@ -3081,8 +3268,13 @@ export function apply(ctx, 配置 = {}) {
         静了几次 += 1
       }
 
+      if (被叫停()) {
+        记一笔('拾星：收到停止，这一批放手（进度 ' + (算进度(文件夹) || '开头') + '）')
+        收(false)
+        return
+      }
       const 现进度 = 算进度(文件夹)
-      const 到齐 = 料.最晚 && 现进度 >= 料.最晚
+      const 到齐 = 料发完 && 料.最晚 && 现进度 >= 料.最晚 && (!只今天 || 有动静())
       // ⚠ 它常常只交日记、不交记忆卡（实测）。日记动了但记忆卡没动 → 单独要一次
       if (现进度 > (已 || '') && 卡后时间() === 卡前时间 && !要过卡) {
         要过卡 = true
@@ -3099,6 +3291,20 @@ export function apply(ctx, 配置 = {}) {
         return
       }
       if (到齐) {
+        // ⭐ 0.2.2：水位也记进账本 —— 下次（补星 / 定时）只取这之后的新内容
+        try {
+          const 账路 = join(文件夹, '.xingxi.json')
+          let 账 = {}
+          try {
+            账 = JSON.parse(readFileSync(账路, 'utf8')) || {}
+          } catch (e) {}
+          if (!只今天) 账.已整理到 = 料.最晚 || 现进度
+          if (有动静() && Number(料.最后时 || 0) > Number(账.已到 || 0)) 账.已到 = Number(料.最后时)
+          writeFileSync(账路, JSON.stringify(账, null, 2), 'utf8')
+          记一笔('水位：' + (账.已整理到 || '?') + ' ｜已到 ' + 账.已到)
+        } catch (e) {
+          记一笔('写水位失败：' + String((e && e.message) || e))
+        }
         记一笔('这一批收工：进度 ' + 现进度 + '（已到目标）')
         收(true)
         return
@@ -3126,8 +3332,6 @@ export function apply(ctx, 配置 = {}) {
       }
       setTimeout(轮, 5000)
     }
-    setTimeout(轮, 5000)
-
     try {
       // ① 先把规则/格式发过去
       await agent.followup({
@@ -3161,6 +3365,8 @@ export function apply(ctx, 配置 = {}) {
           source: { kind: 'plugin:xingxi-pick' },
         })
       }
+      料发完 = true
+      setTimeout(轮, 3000)
     } catch (e) {
       收(false)
       return { ok: false, 原因: '把提示词交过去失败：' + String((e && e.message) || e) }
@@ -3340,7 +3546,7 @@ export function apply(ctx, 配置 = {}) {
                 }
               } catch {}
             }
-            return 回JSON(res, { 会话: 列, 根: 档案根, 写日记: 读日记设置(地址.searchParams.get('sid') || '') })
+            return 回JSON(res, { 会话: 列, 根: 档案根, 定时: 读定时设置(地址.searchParams.get('sid') || '') })
           }
           if (径 === '/dsh-xingxi/graph') {
             const sid = 地址.searchParams.get('sid') || ''
@@ -3383,7 +3589,7 @@ export function apply(ctx, 配置 = {}) {
                 记一笔('手动拾星：' + 这项.目录 + ' 继续（暂停与节流已清）')
               }
             } catch {}
-            const 出 = await 派一批(这项)
+            const 出 = await 派一批(这项, { 手动: true })
             return 回JSON(res, 出.ok ? 出 : { ok: false, 原因: 出.原因 }, 出.ok ? 200 : 400)
           }
 
@@ -3432,32 +3638,119 @@ export function apply(ctx, 配置 = {}) {
               return 回JSON(res, { ok: false, 原因: String((e && e.message) || e) }, 400)
             }
           }
-          if (径 === '/dsh-xingxi/diary') {
+          if (径 === '/dsh-xingxi/定时') {
             if (req.method !== 'POST') {
               const sid = String(地址.searchParams.get('sid') || '')
-              return 回JSON(res, { ok: true, 写日记: 读日记设置(sid) })
+              return 回JSON(res, { ok: true, 定时: 读定时设置(sid) })
             }
           }
-          if (径 === '/dsh-xingxi/diary' && req.method === 'POST') {
+          if (径 === '/dsh-xingxi/停止' && req.method === 'POST') {
+            let 体 = ''
+            for await (const 块 of req) 体 += 块
+            let b = {}
+            try {
+              b = JSON.parse(体 || '{}')
+            } catch {}
+            const sid = String(b.sid || '')
+            const 这项 = 列会话(活会话们()).find((x) => x.id === sid) || null
+            const 夹 = (这项 && 这项.目录) || String((读存配置().绑定 || {})[sid] || '')
+            if (!夹) return 回JSON(res, { ok: false, 原因: '这个会话还没有绑定文件夹' }, 400)
+            const 任路2 = join(夹, '.拾星', '任务.json')
+            try {
+              let t = {}
+              try {
+                t = JSON.parse(readFileSync(任路2, 'utf8')) || {}
+              } catch (e) {}
+              t.暂停 = true
+              t.手动停 = true
+              t.暂停原因 = '手动停止'
+              t.连续失败 = 3
+              writeFileSync(任路2, JSON.stringify(t, null, 2), 'utf8')
+              // 正在跑的那个工人：能让它停就让它停
+              const 工 = String(t.工作会话 || '')
+              const ag = 工 && 代理服务 && 代理服务.get ? 代理服务.get(工) : null
+              if (ag && typeof ag.dispose === 'function') {
+                try {
+                  ag.dispose()
+                } catch (e) {}
+              }
+              记一笔('拾星：手动停止（' + 夹 + '）')
+              return 回JSON(res, { ok: true })
+            } catch (e) {
+              return 回JSON(res, { ok: false, 原因: String((e && e.message) || e) }, 400)
+            }
+          }
+          // ⭐ 0.2.2：补星 —— 只给「最后一天」补水位之后的尾巴
+          if (径 === '/dsh-xingxi/补星' && req.method === 'POST') {
+            let 体 = ''
+            for await (const 块 of req) 体 += 块
+            let b = {}
+            try {
+              b = JSON.parse(体 || '{}')
+            } catch {}
+            const sid = String(b.sid || '')
+            if (!sid) return 回JSON(res, { ok: false, 原因: '不知道是哪个会话' }, 400)
+            const 这项 = 列会话(活会话们()).find((x) => x.id === sid) || null
+            const 夹 = (这项 && 这项.目录) || String((读存配置().绑定 || {})[sid] || '')
+            if (!夹) return 回JSON(res, { ok: false, 原因: '这个会话还没有绑定文件夹' }, 400)
+            // 人亲自点的，先把停止标记放掉（不然会回「已经停了」）
+            try {
+              const 任路3 = join(夹, '.拾星', '任务.json')
+              const t3 = JSON.parse(readFileSync(任路3, 'utf8')) || {}
+              if (t3.暂停) {
+                t3.暂停 = false
+                t3.手动停 = false
+                t3.连续失败 = 0
+                delete t3.暂停原因
+                writeFileSync(任路3, JSON.stringify(t3, null, 2), 'utf8')
+              }
+            } catch (e) {}
+            const 源 = 找源会话(夹) || sid
+            let 水位 = 读水位(夹)
+            // ⚠ 今天的日记还是占位（没真内容）→ 当它没补过，整天的料重来一遍
+            //   （不然水位已经吃掉了今天，补星会一直说「没有新内容」）
+            const 今天 = 今天串()
+            try {
+              const 卡文 = String(readFileSync(join(夹, '日记', 今天 + '.md'), 'utf8') || '')
+                .replace(/^#.*$/gm, '')
+                .replace(/[\s\-*_`>#（）()]/g, '')
+              if (卡文.length < 40) 水位 = 0
+            } catch (e) {
+              水位 = 0
+            }
+            // ⚠ 只补**已整理到的那一天**：以前这里把「已整理到」传成空，于是一次补了两个月
+            const 今天2 = 今天串()
+            const 前天 = new Date(Date.parse(今天2 + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10)
+            const 切 = 按天切(源, 前天, 水位)
+            if (!切.天数) return 回JSON(res, { ok: true, 补: { 天数: 0, 原因: '水位之后没有新内容' } })
+            const r = await 派一批({ id: sid, 目录: 夹, 名: (这项 && 这项.名) || '' }, { 只今天: true, 写日记: true, 手动: true })
+            return 回JSON(res, r.ok ? { ok: true, 补: { 天数: 切.天数, 最早: 切.最早, 最晚: 切.最晚 } } : { ok: false, 原因: r.原因 })
+          }
+          if (径 === '/dsh-xingxi/定时' && req.method === 'POST') {
             let 体 = ''
             for await (const 块 of req) 体 += 块
             try {
               const 存 = 读存配置()
-              const 旧 = 存.写日记 || {}
+              const 旧 = 存.定时 || {}
               const 来 = JSON.parse(体 || '{}')
               const sid = String(来.会话 ?? 来.sid ?? '')
               if (!sid) return 回JSON(res, { ok: false, 原因: '不知道是哪个会话的设置' }, 400)
               const 各 = { ...((旧 && 旧.各 && typeof 旧.各 === 'object') ? 旧.各 : {}) }
               const 该 = { ...(各[sid] || {}) }
-              if (来.开 !== undefined) 该.开 = Boolean(来.开)
               if (来.时 !== undefined) 该.时 = Math.max(0, Math.min(23, Number(来.时)))
               if (来.分 !== undefined) 该.分 = Math.max(0, Math.min(59, Number(来.分)))
+              for (const k of ['自己', '星汐']) if (来[k] !== undefined) 该[k] = Boolean(来[k])
+              delete 该.只卡
+              delete 该.提醒日记
+              delete 该.连日记
+              // ⭐ 两种只能开一种
+              if (该.星汐) 该.自己 = false
+              else if (该.自己) 该.星汐 = false
               各[sid] = 该
-              存配置({ 写日记: { ...旧, 各 } })
-              // 改了开关或时间，今天允许重新来一次（只影响这个会话）
+              存配置({ 定时: { ...旧, 各 } })
               日记已跑.delete(sid + '|' + 今天串())
-              记一笔('日记设置已存（' + sid.slice(0, 18) + '）：' + JSON.stringify(该))
-              return 回JSON(res, { ok: true, 写日记: 读日记设置(sid) })
+              记一笔('定时设置已存（' + sid.slice(0, 18) + '）：' + JSON.stringify(该))
+              return 回JSON(res, { ok: true, 定时: 读定时设置(sid) })
             } catch (e) {
               return 回JSON(res, { ok: false, 原因: String((e && e.message) || e) }, 400)
             }

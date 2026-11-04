@@ -950,6 +950,13 @@ window.__ModuleLoader__.load({
             }
           }
 
+          // ⭐ 0.2.2：页面看不见（切走 / 最小化）就别画了，省一个核
+          if (document.hidden) {
+            setTimeout(() => {
+              if (!停) 帧 = requestAnimationFrame(画)
+            }, 250)
+            return
+          }
           帧 = requestAnimationFrame(画)
         }
         帧 = requestAnimationFrame(画)
@@ -1350,38 +1357,65 @@ window.__ModuleLoader__.load({
         colorScheme: 'dark', outline: 'none', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.035)' }   // ⭐ 不加这句，系统弹出的列表是白底，字看不清
       const 选项 = { background: '#101a2e', color: '#dbe6ff' }
 
-      // ── 日记定时 ───────────────────────────────────────
-      const [日设, 设日] = useState(null)
-      const 日记设置代 = useRef(0)
+      // ── 定时（每个会话一份）─────────────────────────────
+      const [定设, 设定] = useState(null)
+      const 定代 = useRef(0)
       useEffect(() => {
-        const 代 = ++日记设置代.current
+        const 代 = ++定代.current
         let 活着 = true
-        // ⭐ 0.2.1：写日记是**每个会话各管各的**，所以要带上这个会话的 id 去问
-        fetch('/dsh-xingxi/diary?sid=' + encodeURIComponent((会话 && 会话.id) || ''), { cache: 'no-store' })
+        const 空 = { 时: 23, 分: 30, 自己: false, 星汐: false, 会话: (会话 && 会话.id) || '' }
+        fetch('/dsh-xingxi/定时?sid=' + encodeURIComponent((会话 && 会话.id) || ''), { cache: 'no-store' })
           .then((r) => (r.ok ? r.json() : null))
           .then((j) => {
-            if (!活着 || 日记设置代.current !== 代) return
-            设日(j && j.写日记 ? { ...j.写日记, 会话: 会话 && 会话.id ? 会话.id : '' } : { 开: false, 时: 23, 分: 30, 会话: 会话 && 会话.id ? 会话.id : '' })
+            if (!活着 || 定代.current !== 代) return
+            设定(j && j.定时 ? { ...j.定时, 会话: (会话 && 会话.id) || '' } : 空)
           })
           .catch(() => {
-            if (活着 && 日记设置代.current === 代) 设日({ 开: false, 时: 23, 分: 30, 会话: 会话 && 会话.id ? 会话.id : '' })
+            if (活着 && 定代.current === 代) 设定(空)
           })
         return () => { 活着 = false }
       }, [会话 && 会话.id])
-      const 存日 = async (改) => {
-        const 新 = { ...(日设 || {}), ...改, 会话: 会话 && 会话.id ? 会话.id : '' }
-        设日(新)
+      const 存定 = async (改) => {
+        const 新设 = { ...(定设 || {}), ...改, 会话: (会话 && 会话.id) || '' }
+        // 两种只能开一种
+        if (新设.星汐) 新设.自己 = false
+        else if (新设.自己) 新设.星汐 = false
+        设定(新设)
         try {
-          await fetch('/dsh-xingxi/diary', {
+          const r = await fetch('/dsh-xingxi/定时', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(新),
+            body: JSON.stringify(新设),
           })
+          const j = await r.json().catch(() => null)
+          if (j && j.定时) 设定({ ...j.定时, 会话: 新设.会话 })
         } catch (e) {}
       }
-      const 时串 = 日设 ? String(日设.时).padStart(2, '0') + ':' + String(日设.分).padStart(2, '0') : ''
+      const 时串 = 定设 ? String(定设.时).padStart(2, '0') + ':' + String(定设.分).padStart(2, '0') : ''
+      const 开关 = (开着, 点) =>
+        h('button', {
+          type: 'button', role: 'switch', 'aria-checked': Boolean(开着), onClick: 点,
+          style: {
+            display: 'inline-flex', alignItems: 'center', gap: 7, padding: '3px 7px 3px 4px',
+            borderRadius: 999, border: '1px solid ' + (开着 ? 'rgba(91,213,180,0.3)' : 'rgba(158,181,224,0.16)'),
+            background: 开着 ? 'linear-gradient(110deg, rgba(45,164,135,0.2), rgba(52,116,132,0.14))' : 'rgba(143,160,190,0.075)',
+            color: 开着 ? '#a7ead7' : 'rgba(196,209,232,0.56)',
+            fontSize: 10, letterSpacing: 0.2, cursor: 'pointer', fontFamily: 'inherit',
+            boxShadow: 开着 ? 'inset 0 1px 0 rgba(255,255,255,0.05), 0 0 14px rgba(62,180,152,0.08)' : 'none',
+            transition: 'all .18s ease',
+          },
+        },
+          h('i', { style: {
+            width: 22, height: 13, borderRadius: 99, padding: 2, boxSizing: 'border-box', display: 'flex',
+            justifyContent: 开着 ? 'flex-end' : 'flex-start', alignItems: 'center',
+            background: 开着 ? 'rgba(74,202,162,0.48)' : 'rgba(150,165,190,0.3)',
+            transition: 'all .18s ease',
+          } },
+            h('i', { style: { width: 9, height: 9, borderRadius: 99, background: 开着 ? '#d8fff1' : '#c2ccdd', boxShadow: 开着 ? '0 0 8px rgba(171,255,224,0.52)' : '0 1px 3px rgba(0,0,0,0.25)' } })),
+          开着 ? '开' : '关')
+      const 小字 = { fontSize: 10.5, lineHeight: 1.75, color: 'rgba(187,205,235,0.4)' }
 
-      const 日记卡 = 卡('写日记', '到点提醒当前会话写当日日记，并存进这个会话绑定的档案目录', [
+      const 定时卡 = 卡('定时', '到点自动整理这个会话的记忆卡和日记', [
         h('div', { style: { ...行式, borderTop: 'none', paddingTop: 2 } },
           h('span', { style: 标式 }, '几点'),
           h('input', {
@@ -1391,36 +1425,23 @@ window.__ModuleLoader__.load({
               const v = String(e.target.value || '')
               if (!v) return
               const [a, b] = v.split(':')
-              存日({ 时: Number(a), 分: Number(b) })
+              存定({ 时: Number(a), 分: Number(b) })
             },
             style: { ...下拉, colorScheme: 'dark', width: 96 },
-          }),
-          h('div', { style: { ...行式, justifyContent: 'space-between' } },
-            h('span', { style: 标式 }, '自动写日记'),
-            h('button', {
-              type: 'button', role: 'switch', 'aria-checked': Boolean(日设 && 日设.开),
-              onClick: () => 存日({ 开: !Boolean(日设 && 日设.开) }),
-              style: {
-                display: 'inline-flex', alignItems: 'center', gap: 8, padding: '4px 8px 4px 5px',
-                borderRadius: 999, border: '1px solid ' + (日设 && 日设.开 ? 'rgba(91,213,180,0.3)' : 'rgba(158,181,224,0.16)'),
-                background: 日设 && 日设.开 ? 'linear-gradient(110deg, rgba(45,164,135,0.2), rgba(52,116,132,0.14))' : 'rgba(143,160,190,0.075)',
-                color: 日设 && 日设.开 ? '#a7ead7' : 'rgba(196,209,232,0.56)',
-                fontSize: 10.5, letterSpacing: 0.2, cursor: 'pointer', fontFamily: 'inherit',
-                boxShadow: 日设 && 日设.开 ? 'inset 0 1px 0 rgba(255,255,255,0.05), 0 0 14px rgba(62,180,152,0.08)' : 'none',
-                transition: 'all .18s ease',
-              },
-            },
-              h('i', { style: {
-                width: 24, height: 14, borderRadius: 99, padding: 2, boxSizing: 'border-box', display: 'flex',
-                justifyContent: 日设 && 日设.开 ? 'flex-end' : 'flex-start', alignItems: 'center',
-                background: 日设 && 日设.开 ? 'rgba(74,202,162,0.48)' : 'rgba(150,165,190,0.3)',
-                transition: 'all .18s ease',
-              } },
-                h('i', { style: { width: 10, height: 10, borderRadius: 99, background: 日设 && 日设.开 ? '#d8fff1' : '#c2ccdd', boxShadow: 日设 && 日设.开 ? '0 0 8px rgba(171,255,224,0.52)' : '0 1px 3px rgba(0,0,0,0.25)' } })),
-              日设 && 日设.开 ? '已开启' : '已关闭'))),
-        h('div', { style: { ...行式, gap: 8, padding: '6px 0 2px', fontSize: 10.5, color: 'rgba(187,205,235,0.42)' } },
-          h('span', { style: { width: 5, height: 5, borderRadius: 99, background: 会话 && 会话.id ? '#66d2b0' : '#e9b877', boxShadow: 会话 && 会话.id ? '0 0 8px rgba(102,210,176,0.45)' : 'none' } }),
-          会话 && 会话.id ? '将由当前会话写入并保存日记' : '先选择一个会话，定时日记才会运行'),
+          })),
+        // ⚠ 第一行不要上边框（行式自带一条，会跟上面的「几点」之间多出一条线）
+        h('div', { style: { ...行式, borderTop: 'none', justifyContent: 'space-between', paddingTop: 10 } },
+          h('span', { style: { ...标式, whiteSpace: 'nowrap' } }, '让会话自己拾星'),
+          开关(定设 && 定设.自己, () => 存定({ 自己: !(定设 && 定设.自己) }))),
+        h('div', { style: { ...行式, justifyContent: 'space-between' } },
+          h('span', { style: { ...标式, whiteSpace: 'nowrap' } }, '让星汐拾星'),
+          开关(定设 && 定设.星汐, () => 存定({ 星汐: !(定设 && 定设.星汐) }))),
+        // 分隔线只留一条，放在小字上面
+        h('div', { style: { height: 1, background: 'rgba(160,185,235,0.09)', margin: '4px 0 11px' } }),
+        h('div', { style: { ...小字, paddingTop: 9 } },
+          '让会话自己拾星：到点提醒这个会话，它自己写记忆卡和日记。',
+          h('br'),
+          '让星汐拾星：星汐另开一个会话，把记忆卡和日记一起写。'),
       ])
 
 
@@ -1450,6 +1471,44 @@ window.__ModuleLoader__.load({
       )
 
       const [跑, 设跑] = useState(null)
+      const [补, 设补] = useState(null)
+      const [补着, 设补着] = useState(false)
+      // ⭐ 0.2.2 停止：把这一批掐掉，并且不让调度器再派
+      const [停着, 设停着] = useState(false)
+      const 停止 = async () => {
+        if (!会话 || !会话.id) return
+        设停着(true)
+        try {
+          await fetch('/dsh-xingxi/停止', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sid: 会话.id }),
+          })
+          设跑(null)
+          设补({ ok: false, 原因: '已停止' })
+        } catch (e) {} finally {
+          设停着(false)
+        }
+      }
+      // ⭐ 0.2.2 补星：只给「已整理到的那一天」补水位之后的尾巴
+      const 开始补 = async () => {
+        if (!会话 || !会话.id) return
+        设补着(true)
+        设补(null)
+        try {
+          const r = await fetch('/dsh-xingxi/补星', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sid: 会话.id }),
+          })
+          const j = await r.json().catch(() => ({}))
+          设补(j.ok ? { ok: true, 补: j.补 || {} } : { ok: false, 原因: j.原因 || ('HTTP ' + r.status) })
+        } catch (e) {
+          设补({ ok: false, 原因: String((e && e.message) || e) })
+        } finally {
+          设补着(false)
+        }
+      }
       const 开始 = async () => {
         if (!会话 || !会话.id) return
         设跑('跑')
@@ -1502,7 +1561,9 @@ window.__ModuleLoader__.load({
           ]),
            卡('拾星', 会话 && 会话.没跑完
             ? '上次没跑完：整理到 ' + (会话.没跑完.已到 || '还没开始') + '，目标到 ' + 会话.没跑完.最晚
-            : '把会话里还没进档案的日子拾出来，写进上面那个文件夹', [
+            : (图 && 图.统计 && 图.统计.日
+                ? '已经整理到 ' + (图.统计.最后一天 || '') + '，一共 ' + 图.统计.日 + ' 天；点拾星会把还没整理的日子按天往下补'
+                : '把会话里还没进档案的日子拾出来，写进上面那个文件夹'), [
             模型行,
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginTop: 14 } },
               h('button', {
@@ -1510,8 +1571,33 @@ window.__ModuleLoader__.load({
                 disabled: 跑着 || !(会话 && 会话.id),
                 style: { ...主按钮, ...(跑着 || !(会话 && 会话.id) ? { opacity: 0.4, cursor: 'not-allowed' } : {}) },
               }, 跑着 ? '正在开…' : (会话 && 会话.没跑完 ? '接着拾' : '拾星')),
+              h('button', {
+                onClick: 开始补,
+                disabled: 补着 || !(会话 && 会话.id),
+                style: {
+                  ...小按钮, padding: '7px 14px', fontSize: 11.5,
+                  ...(补着 || !(会话 && 会话.id) ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+                },
+              }, 补着 ? '补着…' : '补星'),
+              h('button', {
+                onClick: 停止,
+                disabled: 停着 || !(会话 && 会话.id),
+                style: {
+                  ...小按钮, padding: '7px 14px', fontSize: 11.5,
+                  color: 'rgba(255,206,206,0.86)', borderColor: 'rgba(226,150,150,0.3)',
+                  ...(停着 || !(会话 && 会话.id) ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+                },
+              }, 停着 ? '停着…' : '停止'),
               h('span', { style: { fontSize: 11, opacity: 0.35, lineHeight: 1.6 } },
                 跑着 ? '在切料、开新会话' : 会话 && !会话.有 ? '还没有档案，拾完就有了' : '会新开一个会话，让它一天一天往下做')),
+            补
+              ? h('div', { style: { marginTop: 10, fontSize: 11.5, lineHeight: 1.8, color: 补.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
+                  补.ok
+                    ? 补.补 && 补.补.天数
+                      ? '补上了：' + 补.补.最早 + (补.补.最晚 && 补.补.最晚 !== 补.补.最早 ? ' ~ ' + 补.补.最晚 : '') + '，新会话已经领到活儿。'
+                      : String((补.补 && 补.补.原因) || '没有新内容')
+                    : String(补.原因 || '没补成'))
+              : null,
             跑 && 跑 !== '跑'
               ? h('div', { style: { marginTop: 12, fontSize: 11.5, lineHeight: 1.8, color: 跑.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
                   跑.ok
@@ -1519,7 +1605,7 @@ window.__ModuleLoader__.load({
                     : String(跑.原因 || '没跑成'))
               : null,
           ]),
-          日记卡,
+          定时卡,
         ))
     }
 
