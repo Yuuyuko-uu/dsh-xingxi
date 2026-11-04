@@ -67,10 +67,25 @@ window.__ModuleLoader__.load({
       return 彩盘[彩号(星)] || '#b9c6e8'
     }
 
-    function 时间轴可见(星, 截止, 视觉时序, 进度) {
+    function 星日期戳(星) {
+      const 日期 = String(星 && (星.事件日 || (星.kind === 'diary' ? 星.date : '')) || '')
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(日期)
+      if (!m) return null
+      const 年 = Number(m[1])
+      const 月 = Number(m[2])
+      const 日 = Number(m[3])
+      if (月 < 1 || 月 > 12 || 日 < 1 || 日 > 31) return null
+      const 戳 = Date.UTC(年, 月 - 1, 日)
+      const 校验 = new Date(戳)
+      return 校验.getUTCFullYear() === 年 && 校验.getUTCMonth() === 月 - 1 && 校验.getUTCDate() === 日 ? 戳 : null
+    }
+
+    function 时间轴可见(星, 截止, 视觉时序, 进度, 核心id) {
       if (!星 || !截止) return true
-      const 日期 = String(星.事件日 || (星.kind === 'diary' ? 星.date : '') || '')
-      if (/^\d{4}-\d{2}-\d{2}$/.test(日期)) return Date.parse(日期 + 'T00:00:00Z') <= 截止
+      // 「我是谁」是时间轴的原点，不因卡片提到的日期而被推迟点亮。
+      if (核心id && 星.id === 核心id) return true
+      const 戳 = 星日期戳(星)
+      if (戳 !== null) return 戳 <= 截止
       if (星.kind === 'diary') return true
       const 序 = 视觉时序 && 视觉时序.get(星.id)
       return 序 === undefined || 序 <= 进度
@@ -95,6 +110,18 @@ window.__ModuleLoader__.load({
       return 随
     }
 
+    // 每颗星用自己的稳定随机方向；保留球形的随机朝向，但不因重绘而乱跳。
+    function 随机球向量(星) {
+      let 种子 = 2166136261
+      const 文 = String(星 && (星.id || 星.title) || '')
+      for (const c of 文) 种子 = Math.imul(种子 ^ c.charCodeAt(0), 16777619) >>> 0
+      const 随 = 造随机(种子)
+      const y = 随() * 2 - 1
+      const 角 = 随() * Math.PI * 2
+      const 横 = Math.sqrt(Math.max(0, 1 - y * y))
+      return { x: 横 * Math.cos(角), y, z: 横 * Math.sin(角) }
+    }
+
     // ── 图标 ────────────────────────────────────────────
     function 图标(props) {
       const 尺 = props && props.size ? props.size : 18
@@ -114,52 +141,47 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── 摆位：一团散开的星云，从中间那颗往外 ──────────────
-    const 章序 = [7, 2, 3, 5, 6, 4, 8]
-    const 簇半径 = { 7: 150, 2: 215, 3: 285, 5: 350, 6: 415, 4: 475, 8: 535 }
+    // ── 摆位：以「我是谁」为锚，按时间向外扩展的随机球体 ────
+    function 核心星索引(星们) {
+      const 明确 = 星们.findIndex((s) =>
+        s.kind === 'card' && (String(s.title || '').trim() === '我是谁' || String(s.chapterName || '').trim() === '我是谁'))
+      if (明确 >= 0) return 明确
+      return 星们.findIndex((s) => s.kind === 'card' && Number(s.chapter) === 1)
+    }
+
+    function 比无日期卡(a, b) {
+      const 章a = Number(a.chapter) || 0
+      const 章b = Number(b.chapter) || 0
+      if (章a > 0 && 章b > 0 && 章a !== 章b) return 章a - 章b
+      if (章a > 0 && !章b) return -1
+      if (!章a && 章b > 0) return 1
+      if (章a > 0 && 章a === 章b) {
+        const 序差 = (Number(a.order) || 0) - (Number(b.order) || 0)
+        if (序差) return 序差
+        return String(a.id).localeCompare(String(b.id))
+      }
+      return String(a.title || '').localeCompare(String(b.title || '')) || String(a.id).localeCompare(String(b.id))
+    }
 
     function 摆位(星们) {
       const n = 星们.length
       const 号 = new Map()
       星们.forEach((s, i) => 号.set(s.id, i))
-      const 随 = 造随机(20260816)
       const x = new Float64Array(n)
       const y = new Float64Array(n)
       const z = new Float64Array(n)
       const 本体 = new Float64Array(n).fill(12)
-
-      // ⭐ 全随机：每颗星在球体里随便一个位置，**不分章、不分团、不分区**
-      //   （用户要的：位置也随机，不是一块一块的）
-      const 半径 = 520
-      for (let i = 0; i < n; i++) {
-        // 球内均匀采样：方向均匀 + 半径按 cbrt 分布
-        const u = 随() * 2 - 1
-        const φ = Math.acos(u)
-        const θ = 随() * Math.PI * 2
-        const r = 半径 * Math.cbrt(随())
-        x[i] = Math.sin(φ) * Math.cos(θ) * r
-        y[i] = Math.cos(φ) * r
-        z[i] = Math.sin(φ) * Math.sin(θ) * r
-        const s = 星们[i]
-        // 大小：跟内容量有关，但乘一个随机数，别整齐
-        本体[i] = (s.kind === 'diary' ? 8 : 10) + Math.min(12, Math.log10(1 + String(s.text || '').length) * 5) * (0.6 + 随() * 0.9)
-      }
-
-      // ⭐ 规则（对所有档案都成立）：
-      //   1. 第一章首条核心记忆：最大最亮
-      //   2. 每章的第一条：比普通条目大一档，好认
-      //   3. 同章的星互连最近的 2 颗 → 有脉络，不是一盘散沙
-      let 核心 = 0
+      const 核心 = 核心星索引(星们)
       const 章首 = new Map()
+
       for (let i = 0; i < n; i++) {
         const s = 星们[i]
+        本体[i] = (s.kind === 'diary' ? 7 : 8.5) + Math.min(10, Math.log10(1 + String(s.text || '').length) * 4.4) * 0.76
         if (s.kind !== 'card') continue
         const c = Number(s.chapter) || 0
         if (c && !章首.has(c)) 章首.set(c, i)
       }
-      const 一 = 星们.findIndex((s) => s.kind === 'card' && Number(s.chapter) === 1)
-      if (一 >= 0) {
-        核心 = 一
+      if (核心 >= 0) {
         x[核心] = 0
         y[核心] = 0
         z[核心] = 0
@@ -168,6 +190,49 @@ window.__ModuleLoader__.load({
       for (const [, i] of 章首) {
         if (i === 核心) continue
         本体[i] = Math.max(本体[i], 24)
+      }
+
+      // 日期决定先后顺序，不让日历空档制造大距离；半径随星数缓慢增长。
+      const 已定星 = []
+      const 未定星 = []
+      for (let i = 0; i < n; i++) {
+        const 戳 = 星日期戳(星们[i])
+        if (戳 !== null) {
+          if (i !== 核心) 已定星.push({ i, 戳 })
+        } else if (i !== 核心) {
+          未定星.push(i)
+        }
+      }
+      const 无日期卡 = 未定星.filter((i) => 星们[i].kind === 'card').map((i) => 星们[i]).sort(比无日期卡)
+      const 其他未定星 = 未定星.filter((i) => 星们[i].kind !== 'card').map((i) => 星们[i]).sort((a, b) => String(a.id).localeCompare(String(b.id)))
+      const 内圈星 = [...无日期卡, ...其他未定星].map((s) => 号.get(s.id))
+      const 未定内圈 = 72
+      const 未定外圈 = 内圈星.length ? Math.min(300, 100 + Math.log2(内圈星.length + 1) * 22) : 0
+      const 日期内圈 = 未定外圈 ? Math.max(105, 未定外圈 * 0.72) : 72
+      const 日期外圈 = Math.max(日期内圈 + 40, Math.min(460, 170 + Math.sqrt(n) * 7))
+
+      // 无可靠日期的星围绕「我是谁」排在内层；章节顺序与显现顺序一致。
+      for (let k = 0; k < 内圈星.length; k++) {
+        const i = 内圈星[k]
+        const t = 内圈星.length <= 1 ? 0 : k / (内圈星.length - 1)
+        // 半径按球体体积（r³）展开，避免随机点堆在视觉中心。
+        const r = Math.cbrt(未定内圈 ** 3 + (未定外圈 ** 3 - 未定内圈 ** 3) * t)
+        const d = 随机球向量(星们[i])
+        x[i] = d.x * r
+        y[i] = d.y * r
+        z[i] = d.z * r
+      }
+
+      // 先按日期排序，再按实际星数逐颗向外；缺日不会留出空球壳。
+      已定星.sort((a, b) => a.戳 - b.戳 || String(星们[a.i].id).localeCompare(String(星们[b.i].id)))
+      for (let k = 0; k < 已定星.length; k++) {
+        const { i } = 已定星[k]
+        const t = 已定星.length <= 1 ? 0 : k / (已定星.length - 1)
+        const r = Math.cbrt(日期内圈 ** 3 + (日期外圈 ** 3 - 日期内圈 ** 3) * t)
+        const d = 随机球向量(星们[i])
+        x[i] = d.x * r
+        y[i] = d.y * r
+        z[i] = d.z * r
       }
 
       // 同章近邻线：每颗星连到同章最近的 2 颗（太远的不连）
@@ -236,13 +301,13 @@ window.__ModuleLoader__.load({
     function 造背景() {
       const 随 = 造随机(911)
       const 尘 = []
-      // 细微星尘为主，少量针尖亮星拉开景深；避免满屏颗粒造成噪声。
-      for (let i = 0; i < 600; i++) {
-        const 亮星 = i < 24
+      // 背景尘只留稀疏、低亮的远景，避免和主体星图抢密度。
+      for (let i = 0; i < 360; i++) {
+        const 亮星 = i < 12
         尘.push({
           u: 随(), v: 随(),
-          r: 亮星 ? 0.8 + 随() * 1.1 : 0.35 + 随() * 0.8,
-          a: 亮星 ? 0.16 + 随() * 0.2 : 0.018 + Math.pow(随(), 2) * 0.12,
+          r: 亮星 ? 0.7 + 随() * 0.9 : 0.3 + 随() * 0.65,
+          a: 亮星 ? 0.11 + 随() * 0.13 : 0.008 + Math.pow(随(), 2) * 0.07,
           亮星,
           色: ['#b9d4ff', '#9de6e0', '#f1c4ff', '#ffe0aa'][Math.floor(随() * 4)],
           相位: 随() * Math.PI * 2,
@@ -280,6 +345,28 @@ window.__ModuleLoader__.load({
       const 容器 = useRef(null)
       const 机位 = useRef({ 转: 0.42, 俯: -0.68, 缩: 0.6, 宽: 600, 高: 500 })
       const 适配缩 = useRef(0.6)
+      // ⭐ 0.1.7：视距记在浏览器里 —— 上次拉多近，下次进来还是一样。
+      //   （只记缩放；转角不动，免得下次进来方向是歪的）
+      const 默认再近 = 1.35   // 自适应之后再拉近一点点（这个数觉得不合适就调它）
+      const 读机位 = () => {
+        try {
+          const 存 = JSON.parse(localStorage.getItem('xingxi.机位') || '{}')
+          const 缩 = Number(存 && 存.缩)
+          if (Number.isFinite(缩) && 缩 >= 0.2 && 缩 <= 3.4) return 缩
+        } catch (e) {}
+        return 0
+      }
+      const 存机位 = useMemo(() => {
+        let 定 = 0
+        return () => {
+          clearTimeout(定)
+          定 = setTimeout(() => {
+            try {
+              localStorage.setItem('xingxi.机位', JSON.stringify({ 缩: 机位.current.缩 }))
+            } catch (e) {}
+          }, 260)
+        }
+      }, [])
       const 拖 = useRef(null)
       const 自动缩 = useRef(true)
       const 位 = useRef(null)
@@ -332,20 +419,15 @@ window.__ModuleLoader__.load({
         设年轮(0)
         设播放(false)
       }
+      const 核心索引 = 图 && Array.isArray(图.星) ? 核心星索引(图.星) : -1
+      const 核心id = 核心索引 >= 0 ? 图.星[核心索引].id : ''
       const 视觉时序 = useMemo(() => {
-        const 卡们 = 时间资料.无日期卡
-        const 可排 = 卡们.filter((星) => Number(星.chapter) > 0)
-        const 章节 = [...new Set(可排.map((星) => Number(星.chapter)))].sort((a, b) => a - b)
-        const 每章 = new Map(章节.map((章) => [章, 可排.filter((星) => Number(星.chapter) === 章).sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.id).localeCompare(String(b.id)))]))
+        // 核心星常亮；其余无日期卡按章节/条目顺序渐显，和内层球壳的半径顺序一致。
+        const 卡们 = 时间资料.无日期卡.filter((星) => 星.id !== 核心id).sort(比无日期卡)
         const 顺序 = new Map()
-        章节.forEach((章, 章序) => {
-          const 列表 = 每章.get(章) || []
-          列表.forEach((星, 项序) => 顺序.set(星.id, 0.08 + ((章序 + (项序 + 1) / (列表.length + 1)) / Math.max(1, 章节.length)) * 0.84))
-        })
-        const 未分章 = 卡们.filter((星) => !顺序.has(星.id)).sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')))
-        未分章.forEach((星, i) => 顺序.set(星.id, 0.12 + (i + 1) / (未分章.length + 1) * 0.76))
+        卡们.forEach((星, i) => 顺序.set(星.id, 0.08 + ((i + 1) / (卡们.length + 1)) * 0.84))
         return 顺序
-      }, [时间资料])
+      }, [时间资料, 核心id])
       const 年轮进度 = 年轮 <= 0 ? 1 : Math.max(0, Math.min(1, (年轮 - 时间资料.最早) / Math.max(1, 时间资料.最晚 - 时间资料.最早)))
       function 日期文字(戳) {
         if (!戳) return ''
@@ -445,8 +527,18 @@ window.__ModuleLoader__.load({
             边X = Math.max(边X, Math.abs(q.X1 * k))
             边Y = Math.max(边Y, Math.abs(q.Y2 * k))
           }
-          机位.current.缩 = Math.min((0.48 * w) / 边X, (0.48 * ht) / 边Y)
-          适配缩.current = 机位.current.缩
+          // 用固定参考半径留出边距；少量星不会被自动放大到铺满整个画布。
+          const 参考边 = 520
+          // ⭐ 0.1.7：默认再拉近一点（原来铺得太远，星星小、中间空）
+          const 默认缩 = Math.min((0.42 * w) / Math.max(边X, 参考边), (0.42 * ht) / Math.max(边Y, 参考边)) * 默认再近
+          适配缩.current = 默认缩
+          机位.current.缩 = 默认缩
+          // 上次拉多近就用多近（「重置」才会回到默认）
+          const 记着 = 读机位()
+          if (记着) {
+            机位.current.缩 = 记着
+            自动缩.current = false
+          }
         }
 
         const 量尺寸 = () => {
@@ -569,7 +661,7 @@ window.__ModuleLoader__.load({
             const n = 数.星.length
             const 投 = new Array(n)
             for (let i = 0; i < n; i++) 投[i] = 投影(p.x[i], p.y[i], p.z[i], 转, 俯, 缩, 宽, 高)
-            if (p.核心 >= 0 && p.核心 < n && 时间轴可见(数.星[p.核心], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current)) {
+            if (p.核心 >= 0 && p.核心 < n && 时间轴可见(数.星[p.核心], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id)) {
             const 核 = 投[p.核心] || 投影(0, 0, 0, 转, 俯, 缩, 宽, 高)
             const 核脉动 = 0.97 + 0.03 * Math.sin(performance.now() / 1000 * 0.55)
             const 核r = Math.max(112, 168 * 缩 * 核脉动)
@@ -631,7 +723,7 @@ window.__ModuleLoader__.load({
                 笔.strokeStyle = 透明(色, 亮 ? 0.9 : 焦点 ? 0.08 : 0.22)
                 笔.lineWidth = 亮 ? 1.55 : 0.82
                 for (const i of 组.标) {
-                  if (!时间轴可见(数.星[i], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current)) continue
+                  if (!时间轴可见(数.星[i], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id)) continue
                   const q = 投[i]
                   笔.beginPath()
                   笔.moveTo(心投.X, 心投.Y)
@@ -646,7 +738,7 @@ window.__ModuleLoader__.load({
               for (const l of 数.线) {
                 const a星 = 数.星[l.a]
                 const b星 = 数.星[l.b]
-                if (!时间轴可见(a星, 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current) || !时间轴可见(b星, 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current)) continue
+                if (!时间轴可见(a星, 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id) || !时间轴可见(b星, 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id)) continue
                 const a = 投[l.a]
                 const b = 投[l.b]
                 if (!a || !b) continue
@@ -670,7 +762,7 @@ window.__ModuleLoader__.load({
                 const a = ia === undefined ? b.a : ia
                 const c = ib === undefined ? b.b : ib
                 if (a === undefined || c === undefined) continue
-                if (!时间轴可见(数.星[a], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current) || !时间轴可见(数.星[c], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current)) continue
+                if (!时间轴可见(数.星[a], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id) || !时间轴可见(数.星[c], 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id)) continue
                 if (投[a] === undefined || 投[c] === undefined) continue
                 const 亮 = 焦点 && (数.星[a].id === 焦点 || 数.星[c].id === 焦点)
                 笔.strokeStyle = 亮 ? 'rgba(255,198,130,0.78)' : 焦点 ? 'rgba(255,190,120,0.025)' : 'rgba(255,190,120,0.08)'
@@ -719,7 +811,7 @@ window.__ModuleLoader__.load({
                   : (贴图.彩 && 贴图.彩[彩号(星)]) || 贴图.默认
               const 深 = 焦 / (焦 + q.Z)
               // 完整事件日期按真实日期筛选；未标日期的记忆卡按章节视觉顺序渐显。
-              if (!时间轴可见(星, 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current)) continue
+              if (!时间轴可见(星, 年轮ref.current, 视觉时序ref.current, 年轮进度ref.current, 核心id)) continue
               // ⭐ 能量：越新越亮，越久越暗（化石态是「暗但不消失」）
               const 天 = 星.时 ? (Date.now() - 星.时) / 86400000 : 120
               const 能量 = 0.42 + 0.58 * Math.exp(-Math.max(0, 天) / 110)
@@ -922,16 +1014,21 @@ window.__ModuleLoader__.load({
         e.preventDefault()
         自动缩.current = false
         机位.current.缩 = Math.max(0.2, Math.min(3.4, 机位.current.缩 * (e.deltaY > 0 ? 0.92 : 1.08)))
+        存机位()
       }
       const 手动缩放 = (倍数) => {
         自动缩.current = false
         机位.current.缩 = Math.max(0.2, Math.min(3.4, 机位.current.缩 * 倍数))
+        存机位()
       }
       const 重置视图 = () => {
         机位.current.转 = 0.42
         机位.current.俯 = -0.68
         机位.current.缩 = 适配缩.current
         自动缩.current = true
+        try {
+          localStorage.removeItem('xingxi.机位')
+        } catch (e) {}
       }
 
       useEffect(() => {
