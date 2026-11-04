@@ -1695,6 +1695,10 @@ window.__ModuleLoader__.load({
                         background: s.有 ? '#9ed0ff' : 'rgba(150,170,210,0.35)',
                       } }),
                       h('span', { style: { fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.名),
+                      // ⭐ 0.1.6：DSH 侧栏里那栏「未分组」的会话（不属于任何工作区）
+                      s.未分组
+                        ? h('span', { style: { flex: 'none', fontSize: 9.5, padding: '1px 5px', borderRadius: 6, background: 'rgba(150,170,210,0.12)', color: 'rgba(186,205,236,0.55)' } }, '未分组')
+                        : null,
                       h('span', { 'aria-hidden': true, style: { flex: 'none', fontSize: 12, letterSpacing: -2, opacity: 拖会话 === s.id ? 0.78 : 0.23, color: 'rgba(198,216,247,0.8)', cursor: 'grab', transition: 'opacity .15s ease' } }, '⠿')),
 
                     h('div', { style: { fontSize: 10.5, opacity: 0.34, marginLeft: 13 } },

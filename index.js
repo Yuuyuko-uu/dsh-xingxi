@@ -418,17 +418,56 @@ import * as zlib from 'node:zlib'
 
 const 会话根 = join(家, 'sessions')
 
+/**
+ * ⭐ 0.1.6：把磁盘上的会话目录全列出来 —— **两种摆法都认**。
+ *
+ *   `~/.dsh/sessions/<工作区目录名>/<session-…>/`   ← 正常的工作区会话
+ *   `~/.dsh/sessions/<session-…>/`                  ← 没有工作区的（DSH 侧栏里那栏「未分组」）
+ *
+ * ⚠ 以前只认第一种：直接摊在 `sessions` 底下的会话一条都扫不到，
+ *   于是「未分组」那一栏永远空着（手机上尤其明显）。
+ */
+function 列会话目录() {
+  const 出 = []
+  let 顶们 = []
+  try {
+    顶们 = readdirSync(会话根, { withFileTypes: true }).filter((d) => d.isDirectory())
+  } catch {
+    return 出
+  }
+  for (const d of 顶们) {
+    const 名 = String(d.name || '')
+    if (!名) continue
+    if (名.startsWith('session-')) {
+      出.push({ id: 名, 工作区目录: '', 目录: join(会话根, 名) })
+      continue
+    }
+    let 子们 = []
+    try {
+      子们 = readdirSync(join(会话根, 名), { withFileTypes: true }).filter((x) => x.isDirectory())
+    } catch {
+      continue
+    }
+    for (const s of 子们) {
+      const 子名 = String(s.name || '')
+      if (!子名.startsWith('session-')) continue
+      出.push({ id: 子名, 工作区目录: 名, 目录: join(会话根, 名, 子名) })
+    }
+  }
+  return 出
+}
+
 /** 找这个会话 id 的日志文件（在哪个工作区目录下不确定，得扫） */
 export function 找会话日志(会话id) {
   if (!会话id) return ''
-  try {
-    for (const ws of readdirSync(会话根)) {
-      const p = join(会话根, ws, 会话id, 'session.v4.jsonl.zstd')
-      try {
-        if (statSync(p).isFile()) return p
-      } catch {}
-    }
-  } catch {}
+  const 目标 = String(会话id)
+  for (const x of 列会话目录()) {
+    if (x.id !== 目标) continue
+    const p = join(x.目录, 'session.v4.jsonl.zstd')
+    try {
+      if (statSync(p).isFile()) return p
+    } catch {}
+  }
   return ''
 }
 
@@ -1352,46 +1391,31 @@ function 读工作区状态(目录服务) {
 }
 
 function 扫全部会话(目录服务) {
-  const 根 = join(家, 'sessions')
   const 态 = 读工作区状态(目录服务)
   const 出 = []
-  let 工作区们 = []
-  try {
-    工作区们 = readdirSync(根, { withFileTypes: true }).filter((d) => d.isDirectory())
-  } catch {
-    return 出
-  }
-  for (const ws of 工作区们) {
-    let 子们 = []
-    try {
-      子们 = readdirSync(join(根, ws.name), { withFileTypes: true }).filter((d) => d.isDirectory())
-    } catch {
-      continue
+  for (const d of 列会话目录()) {
+    const 路径 = join(d.目录, 'session.v4.jsonl.zstd')
+    if (!existsSync(路径)) continue
+    const 头 = 读会话头(路径)
+    if (!头) continue
+    const 缓 = 读会话缓存(d.id)
+    if (缓) {
+      if (缓.空 || 缓.子代理) continue      // 空会话 / 子代理会话不列
+      if (缓.标题) 头.标题 = 缓.标题
     }
-    for (const d of 子们) {
-      if (!d.name.startsWith('session-')) continue
-      const 路径 = join(根, ws.name, d.name, 'session.v4.jsonl.zstd')
-      if (!existsSync(路径)) continue
-      const 头 = 读会话头(路径)
-      if (!头) continue
-      const 缓 = 读会话缓存(d.name)
-      if (缓) {
-        if (缓.空 || 缓.子代理) continue      // 空会话 / 子代理会话不列
-        if (缓.标题) 头.标题 = 缓.标题
-      }
-      if (头.深度 > 0) continue            // 子代理不算
-      if (头.机器) continue                  // 拾星自己派出去的工位不算
-      if (态.归档.has(d.name)) continue     // ⚠ 归档的不算（她明确要求）
-      // 拾星自己开出去干活的分身（cwd 在 xingxi 目录下）不列 —— 它们不是她的会话
-      const cw = String(头.cwd || '').split(String.fromCharCode(92)).join('/').toLowerCase()
-      if (cw.includes('/.dsh/xingxi/')) continue
-      出.push({
-        id: d.name,
-        头: { cwd: 头.cwd, createdAt: 头.createdAt },
-        标题: 头.标题 || ('会话 ' + String(d.name).slice(8, 14)),
-        工作区: 态.归属.get(d.name) || '未分组',
-      })
-    }
+    if (头.深度 > 0) continue            // 子代理不算
+    if (头.机器) continue                  // 拾星自己派出去的工位不算
+    if (态.归档.has(d.id)) continue     // ⚠ 归档的不算（她明确要求）
+    // 拾星自己开出去干活的分身（cwd 在 xingxi 目录下）不列 —— 它们不是她的会话
+    const cw = String(头.cwd || '').split(String.fromCharCode(92)).join('/').toLowerCase()
+    if (cw.includes('/.dsh/xingxi/')) continue
+    出.push({
+      id: d.id,
+      头: { cwd: 头.cwd, createdAt: 头.createdAt },
+      标题: 头.标题 || ('会话 ' + String(d.id).slice(8, 14)),
+      // ⭐ 认不出工作区归属的就是「未分组」—— DSH 侧栏里那一栏也是这么叫的
+      工作区: 态.归属.get(d.id) || '未分组',
+    })
   }
   出.sort((a, b) => (b.头.createdAt || 0) - (a.头.createdAt || 0))
   return 出
@@ -1477,7 +1501,9 @@ export function 列会话(活们 = [], 只要工作区 = '') {
     if (!id || 见过.has(id)) continue
     if (归档名单.has(id)) continue
     // ⭐ 只列**当前工作区**的会话（跟 DSH 侧栏一致）；别的区的会话在这儿只会显得对不上
-    if (只要工作区 && 项.工作区 && 项.工作区 !== 只要工作区) continue
+    //   ⚠ 但「未分组」例外：那是 DSH 客户端临时兜出来的分组（workspaceId 为空、没有记录），
+    //     不属于任何工作区 —— 按工作区过滤的话永远看不见，所以在哪儿都列出来。
+    if (只要工作区 && 项.工作区 && 项.工作区 !== 只要工作区 && 项.工作区 !== '未分组') continue
     见过.add(id)
     const 夹 = String((存的.绑定 && 存的.绑定[id]) || '') || join(档案根, id)
     const 量 = 估重(夹)
@@ -1489,6 +1515,7 @@ export function 列会话(活们 = [], 只要工作区 = '') {
       份数: 量.份数,
       字: 量.字,
       时: Number(项.头 && 项.头.createdAt) || 0,
+      未分组: 项.工作区 === '未分组',
     })
   }
 
