@@ -12,7 +12,7 @@
 // 跟「鱼的记忆」的分工：鱼的记忆管会淡忘的记忆和权重；星汐只管摊开给你看。
 // ⚠ 遗忘/衰减**不在这里做**。
 
-import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, rmSync, openSync, readSync, closeSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, rmSync, openSync, readSync, closeSync, copyFileSync, renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -418,6 +418,13 @@ import * as zlib from 'node:zlib'
 
 const 会话根 = join(家, 'sessions')
 
+/** ⭐ 0.1.8：会话目录名有两种 —— `session-<uuid>` 和裸 `<uuid>`（插件建的那种，比如 QQ 群的）。
+ *  比 id 的时候一律去掉前缀再比，不然带前缀的永远匹配不上裸的。 */
+function 裸会话id(名) {
+  const n = String(名 || '')
+  return n.startsWith('session-') ? n.slice(8) : n
+}
+
 /**
  * ⭐ 0.1.6：把磁盘上的会话目录全列出来 —— **两种摆法都认**。
  *
@@ -438,7 +445,9 @@ function 列会话目录() {
   for (const d of 顶们) {
     const 名 = String(d.name || '')
     if (!名) continue
-    if (名.startsWith('session-')) {
+    // 工作区目录统一是 `--<编码后的 cwd>--`；不是这个形状的，本身就是会话目录（裸 uuid）
+    if (!名.startsWith('--')) {
+      if (!existsSync(join(会话根, 名, 'session.v4.jsonl.zstd'))) continue
       出.push({ id: 名, 工作区目录: '', 目录: join(会话根, 名) })
       continue
     }
@@ -450,7 +459,8 @@ function 列会话目录() {
     }
     for (const s of 子们) {
       const 子名 = String(s.name || '')
-      if (!子名.startsWith('session-')) continue
+      // ⚠ 以前只认 `session-` 开头 —— 插件建的会话（裸 uuid）全被这一行干掉了
+      if (!existsSync(join(会话根, 名, 子名, 'session.v4.jsonl.zstd'))) continue
       出.push({ id: 子名, 工作区目录: 名, 目录: join(会话根, 名, 子名) })
     }
   }
@@ -460,9 +470,9 @@ function 列会话目录() {
 /** 找这个会话 id 的日志文件（在哪个工作区目录下不确定，得扫） */
 export function 找会话日志(会话id) {
   if (!会话id) return ''
-  const 目标 = String(会话id)
+  const 目标 = 裸会话id(会话id)
   for (const x of 列会话目录()) {
-    if (x.id !== 目标) continue
+    if (裸会话id(x.id) !== 目标) continue
     const p = join(x.目录, 'session.v4.jsonl.zstd')
     try {
       if (statSync(p).isFile()) return p
@@ -711,6 +721,26 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
     : [
         `材料已经切好了，在 ${文件夹}\\.拾星\\料\\ 里，**一天一个 txt 文件**，文件名就是日期。`,
       ]
+  // ⭐ 0.1.8：第二章改成「整章合并」，把现有的这一章一并给它看
+  const 现二 = (() => {
+    try {
+      const p = join(文件夹, '记忆卡.md')
+      if (!existsSync(p)) return ''
+      const 行们 = readFileSync(p, 'utf8').split(new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10)))
+      const 起 = 行们.findIndex((l) => /^##\s*二\s*[、.．｜|]/.test(String(l)))
+      if (起 < 0) return ''
+      let 止 = 行们.length
+      for (let i = 起 + 1; i < 行们.length; i++) {
+        if (/^## /.test(String(行们[i]))) {
+          止 = i
+          break
+        }
+      }
+      return 行们.slice(起 + 1, 止).join(String.fromCharCode(10)).trim()
+    } catch (e) {
+      return ''
+    }
+  })()
   const 步骤 = 内联料
     ? [
         '1. 从**最早那一天**开始看（就是下面第一条带日期的消息）',
@@ -760,7 +790,10 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
     '语气什么样、节奏快慢、爱不爱分行、怎么称呼对方、怎么自称、有没有口头禅。',
     '写具体的动作和习惯，不要只堆形容词。',
     '',
-    '**② 原句照抄（这一章的重点，至少 3 句，能多就多，十几句最好）**',
+    '**② 原句照抄（这一章的精华 —— 整本记忆卡最多留 10 句，不是每批加几句）**',
+    '- ⚠ 这是**合并**：新的一天只挑 0~2 句真正有代表性的，宁缺毋滥；这天没有值得留的，就一句都不挑',
+    '- ⚠ 合完之后总数**不超过 10 句**；超了就把最不典型的挤掉，留场景最不一样的',
+    '- 挑的原则：一句打招呼、一句哄人、一句玩笑或怼人、一句收尾，各有各的场景就够',
     '- 从「料」里**原样摘完整的句子**，加引号，标明是哪天说的',
     '- **一个字都不许改**：不缩写、不润色、不把两句合成一句、不补标点',
     '- 尽量覆盖不同场景：开场怎么打招呼、哄人的时候怎么说、开玩笑怎么接、拒绝或生气怎么说、收尾怎么道别',
@@ -796,6 +829,25 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
     '',
     '> 这一章最重要的不是形容词（「温柔」「直接」），是**能照着模仿的原句**。',
     '> 后来接手的人读完这一章，要能立刻说出一样的口气。',
+    '',
+    '### ⚠ 「二」这一章**交整章，不是交增量**（这一条最容易被忽略）',
+    '这一章会被**整章替换**，不是往后追加。所以：',
+    '1. 把「现有的第二章」跟今天挑出来的句子**合成一章**（原有的好句留着，重复的合并）；',
+    '2. 原句**总共不超过 10 句**（含原有的）；场景分散开，宁可少，不许凑数；',
+    '3. 用下面这个块交（块名后面多写「整章」两个字）：',
+    '',
+    '<<<文件 记忆卡.md#二 整章>>>',
+    '### 2.1 我说话的方式',
+    '（一小段散文）',
+    '**以下是真实出现过的我的话，原句照抄：**',
+    '1. 「……」（10-17）',
+    '### 2.2 说话准则',
+    '1. ……',
+    '',
+    '现有的第二章（就这么多；还没有就空着）：',
+    '```',
+    (现二 || '（还没有）'),
+    '```',
     '',
     '### 不收',
     '- 某天吃了什么、几点睡、去了哪、天气',
@@ -994,7 +1046,14 @@ export function 解析文件块(文本) {
     const 头 = /^<<<文件\s+(.+?)>>>$/.exec(行.trim())
     if (头) {
       if (当前) 结果.文件.push(当前)
-      当前 = { 名: 去前缀(头[1]), 文: '' }
+      // ⭐ 0.1.8：块名后面可以跟「整章」—— 表示这一块是**整章替换**，不是往章里追加
+      let 名 = 去前缀(头[1])
+      let 整章 = false
+      if (/\s+整章$/.test(名)) {
+        整章 = true
+        名 = 名.replace(/\s+整章$/, '')
+      }
+      当前 = { 名, 文: '', 整章 }
       账本行 = null
       continue
     }
@@ -1088,6 +1147,77 @@ function 写一章(文件夹, 文件名, 章号, 文, 指纹, 报告) {
   return [文件名 + " # " + 号]
 }
 
+/** 例子行：编号或短横开头，且带引号 —— 第二章那段「原句照抄」就是这种 */
+function 是例子行(行) {
+  const t = String(行 || '')
+  if (!/^\s*(\d+[.．]|[-*])\s/.test(t)) return false
+  return /[「『"“]/.test(t)
+}
+
+/** 整章替换（块名写成 `记忆卡.md#二 整章`）—— 用来做「合并」而不是「越堆越多」 */
+export function 写一章整章(文件夹, 文件名, 章号, 文, 报告, 例子上限 = 10) {
+  const 汉字 = '一二三四五六七八'
+  const 号 = 汉字.includes(String(章号)) ? 汉字.indexOf(String(章号)) + 1 : Number(章号) || 0
+  const 路径 = join(文件夹, 文件名)
+  if (!号) return []
+  if (!existsSync(路径)) return []
+  let 旧 = ''
+  try {
+    旧 = readFileSync(路径, 'utf8')
+  } catch {
+    return []
+  }
+  const 换行 = String.fromCharCode(10)
+  const 行们 = 旧.split(new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10)))
+  const 章头 = '## ' + 汉字[号 - 1] + '｜'
+  let 起 = -1
+  for (let i = 0; i < 行们.length; i++) {
+    if (String(行们[i]).startsWith(章头)) {
+      起 = i
+      break
+    }
+  }
+  if (起 < 0) return []      // 没有这一章就不动，交给追加那条路
+  let 止 = 行们.length
+  for (let i = 起 + 1; i < 行们.length; i++) {
+    if (/^## /.test(行们[i])) {
+      止 = i
+      break
+    }
+  }
+  // 新正文：去掉它自带的章标题；例子超上限就掐掉多的
+  const 原始 = String(文 || '').split(换行).filter((l) => !/^##\s*[一二三四五六七八]/.test(String(l).trim()))
+  let 数到 = 0
+  let 砍了 = 0
+  const 新行们 = []
+  for (const 行 of 原始) {
+    if (是例子行(行)) {
+      数到++
+      if (数到 > 例子上限) {
+        砍了++
+        continue
+      }
+    }
+    新行们.push(行)
+  }
+  if (!新行们.filter((x) => String(x).trim()).length) return []
+  // 备份
+  try {
+    copyFileSync(路径, 路径 + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23))
+  } catch (e) {}
+  const 拼 = [...行们.slice(0, 起), 行们[起], ...新行们, ...行们.slice(止)]
+  try {
+    const 临时 = 路径 + '.tmp-' + Date.now()
+    writeFileSync(临时, 拼.join(换行), 'utf8')
+    renameSync(临时, 路径)
+  } catch (e) {
+    报告 && 报告.错.push('整章替换写不进去：' + String((e && e.message) || e))
+    return []
+  }
+  记一笔('整章替换：# ' + 号 + (砍了 ? '（例子超过 ' + 例子上限 + ' 条，砍了 ' + 砍了 + ' 条）' : ''))
+  return [文件名 + ' # ' + 号 + ' 整章']
+}
+
 export function 写回(文件夹, 块们) {
   const 报告 = { 写入: [], 跳过: 0, 错: [] }
   const 指纹 = (t) =>
@@ -1098,7 +1228,8 @@ export function 写回(文件夹, 块们) {
     // ⭐ 块名带章号（`记忆卡.md#三`）：直接插进那一章
     const 章m = /^(.+?\.md)#([一二三四五六七八1-8])$/.exec(String(f.名 || ""))
     if (章m) {
-      报告.写入.push(...写一章(文件夹, 章m[1], 章m[2], f.文, 指纹, 报告))
+      if (f.整章) 报告.写入.push(...写一章整章(文件夹, 章m[1], 章m[2], f.文, 报告))
+      else 报告.写入.push(...写一章(文件夹, 章m[1], 章m[2], f.文, 指纹, 报告))
       continue
     }
     const 路径 = join(文件夹, f.名)
@@ -1266,7 +1397,7 @@ const 会话目录缓存 = new Map()
 function 读会话缓存(sid) {
   const 根们 = [join(家, 'storages', 'session_projcache', 'sessions')]
   for (const 根 of 根们) {
-    const p = join(根, sid + '.json')
+    const p = join(根, 裸会话id(sid) + '.json')
     if (!existsSync(p)) continue
     try {
       const r = JSON.parse(readFileSync(p, 'utf8'))?.record?.rows || {}
@@ -2502,6 +2633,8 @@ export function apply(ctx, 配置 = {}) {
 
   // 一批一天：料是**整段贴进消息**的，两天加起来可能十几万字，一天刚好
   const 批天数 = 1
+  // 同一个文件夹两批之间至少隔这么久（一秒一批会把上下文和钱都烧掉；太久又会像卡住）
+  const 节流毫秒 = 90 * 1000
   const 在跑 = new Map()   // 文件夹 → 开始时间
 
   const 派一批 = async (项) => {
@@ -2533,8 +2666,11 @@ export function apply(ctx, 配置 = {}) {
       记一笔('拾星：' + 文件夹 + ' 连续三次没进展，自动停下（不再派）')
       return { ok: false, 原因: '连续三次没进展，已自动停下' }
     }
-    if (旧任.上次派遣 && Date.now() - Number(旧任.上次派遣) < 10 * 60 * 1000) {
-      return { ok: false, 原因: '刚派过（10 分钟内不重复派）' }
+    // ⭐ 0.1.8：节流从「十分钟」改成「一分半」。
+    //   十分钟那版是为了压住当年同时醒着的几十个调度器；现在只留一个 + 连续三次就停，
+    //   再压十分钟的话，几十天的历史要跑一整夜（实测她那边跑完第一天就不动了）。
+    if (旧任.上次派遣 && Date.now() - Number(旧任.上次派遣) < 节流毫秒) {
+      return { ok: false, 原因: '刚派过（一分半内不重复派）' }
     }
     // ⭐ 进程内也只放一个：插件重载留下的旧调度器还醒着时，谁先到谁派，别人让开
     const 锁键 = Symbol.for('dsh-xingxi.派遣锁')
@@ -2813,7 +2949,7 @@ export function apply(ctx, 配置 = {}) {
           setTimeout(轮, 5000)
           return
         }
-        记一笔('催两次都没动，这批放手（会话留着，10 分钟后调度器才会再派）：进度 ' + (现进度 || '开头'))
+        记一笔('催两次都没动，这批放手（会话留着，一分半后调度器才会再派）：进度 ' + (现进度 || '开头'))
         收(false)
         return
       }
@@ -2891,7 +3027,7 @@ export function apply(ctx, 配置 = {}) {
             会话: 源,
             工作会话: 新id,
             开始: Date.now(),
-            // ⭐ 刹车用的时间戳：10 分钟内不再给这个文件夹派第二批
+            // ⭐ 刹车用的时间戳：节流窗口内不再给这个文件夹派第二批
             上次派遣: Date.now(),
             最早: 料.最早,
             // ⚠ 目标要写**整段历史的最后一天**（全部最晚），不是这一批的最晚。
@@ -2936,9 +3072,9 @@ export function apply(ctx, 配置 = {}) {
           continue
         }
         if (!任务 || !任务.最晚) continue
-        // ⭐ 停下的不再自动派；刚派过的等够 10 分钟（跟「派一批」里那三道闸一致）
+        // ⭐ 停下的不再自动派；刚派过的等过节流窗口（跟「派一批」里那三道闸一致）
         if (任务.暂停) continue
-        if (任务.上次派遣 && Date.now() - Number(任务.上次派遣) < 10 * 60 * 1000) continue
+        if (任务.上次派遣 && Date.now() - Number(任务.上次派遣) < 节流毫秒) continue
         const 进度 = 算进度(夹)
         if (进度 && 进度 >= String(任务.最晚)) {
           if (!任务.完成) {
@@ -3059,7 +3195,7 @@ export function apply(ctx, 配置 = {}) {
             } catch {}
             const 这项 = 列会话(活会话们()).find((x) => x.id === sid)
             if (!这项) return 回JSON(res, { ok: false, 原因: '找不到这个会话' }, 400)
-            // ⭐ 手动点「拾星」= 人明确说继续：把自动停下时留的暂停与 10 分钟节流清掉
+            // ⭐ 手动点「拾星」= 人明确说继续：把自动停下时留的暂停与节流清掉
             //   （自动调度守那两道闸，人点了就听人的；进程内那道锁也一起放开）
             try {
               globalThis[Symbol.for('dsh-xingxi.派遣锁')] = 0
