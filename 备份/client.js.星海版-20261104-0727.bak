@@ -1,0 +1,1360 @@
+// DSH 星汐 · 网页半边
+//
+// 页面结构（2026-11-03 她定的）：
+//   ┌ 顶栏：星汐 · 星图 / 档案 / 日记 ───────────── 当前会话 ┐
+//   ├ 主区（星图 或 档案 或 日记）        │ 右边会话侧栏      ┤
+//   └──────────────────────────────────┴───────────────┘
+//   星图只是其中一块，不是整页。每个会话一张图；没档案的会话只有背景 + 一颗暗星。
+//
+// 只读。
+
+window.__ModuleLoader__.load({
+  id: 'dsh-startide',
+  factory(require) {
+    const React = require('react')
+    const h = React.createElement
+    const { useEffect, useMemo, useRef, useState, useCallback } = React
+
+    let 客户端 = null   // 客户端上下文：弹系统选文件夹窗口要用它
+
+    // ⭐ 八章的颜色**每次装载随机生成一次**（不写死），但同一章永远同色：
+    //   色相按黄金角 137.5° 铺开（相邻两章差得最远，不会撞脸），
+    //   明度再交替一下（亮/暗错开），保证「相似的色不挨在一起」。
+    const 章色 = (() => {
+      const hsl2hex = (h, s, l) => {
+        h = ((h % 360) + 360) % 360
+        s /= 100
+        l /= 100
+        const k = (n) => (n + h / 30) % 12
+        const a = s * Math.min(l, 1 - l)
+        const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))
+        const to = (x) => Math.round(255 * x).toString(16).padStart(2, '0')
+        return '#' + to(f(0)) + to(f(8)) + to(f(4))
+      }
+      const 随 = 造随机(Math.floor(Math.random() * 1e9))
+      const 起 = 随() * 360
+      const 明 = [64, 76, 58, 72, 66, 80, 60, 70]
+      const 饱 = [78, 62, 84, 70, 88, 58, 76, 66]
+      const 出 = {}
+      for (let i = 1; i <= 8; i++) 出[i] = hsl2hex(起 + i * 137.508, 饱[i - 1], 明[i - 1])
+      return 出
+    })()
+    // 日记按月，保持原来定好的那套淡色（别改成暖黄 —— 跟定过的配色冲突）
+    const 月色 = { 8: '#e8eeff', 9: '#cedbf8', 10: '#e4deff', 11: '#ffeeda', 12: '#f2e6ff' }
+
+    const 章名表 = {
+      1: '我是谁', 2: '我是怎么说话的', 3: '她是谁', 4: '我们怎么走到今天的',
+      5: '我们的约定', 6: '难忘的时刻', 7: '怎么跟她相处', 8: '我们一起做的那些东西',
+    }
+
+    function 透明(色, a) {
+      const m = /^#([0-9a-f]{6})$/i.exec(色 || '')
+      if (!m) return `rgba(200,220,255,${a})`
+      const v = parseInt(m[1], 16)
+      return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${a})`
+    }
+    // ⭐ 彩盘：96 种颜色（48 色相 × 亮/暗两种）。
+    //   每颗星按自己的 id 散到其中一种 —— **不再按章分色**，看着就是满天随机。
+    const 彩盘 = (() => {
+      const hsl2hex = (h, s2, l) => {
+        h = ((h % 360) + 360) % 360
+        s2 /= 100
+        l /= 100
+        const k = (n) => (n + h / 30) % 12
+        const aa = s2 * Math.min(l, 1 - l)
+        const f = (n) => l - aa * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))
+        const to = (x) => Math.round(255 * x).toString(16).padStart(2, '0')
+        return '#' + to(f(0)) + to(f(8)) + to(f(4))
+      }
+      const 出 = []
+      const 随 = 造随机(4711)
+      for (let i = 0; i < 48; i++) {
+        const h = (i * 137.508 + 随() * 20) % 360
+        出.push(hsl2hex(h, 70 + 随() * 25, 62 + 随() * 14))
+        出.push(hsl2hex(h + 18, 60 + 随() * 30, 50 + 随() * 16))
+      }
+      return 出
+    })()
+
+    // 由星 id 决定取哪个颜色（同一次打开里稳定，不会闪）
+    function 彩号(星) {
+      const t = String(星.id || 星.title || '')
+      let h = 2166136261
+      for (const c of t) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0
+      return h % 彩盘.length
+    }
+
+    function 星色(星) {
+      return 彩盘[彩号(星)] || '#b9c6e8'
+    }
+
+    function 造随机(种子) {
+      let a = 种子 >>> 0
+      const 随 = () => {
+        a = (a + 0x6d2b79f5) >>> 0
+        let t = Math.imul(a ^ (a >>> 15), 1 | a)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      }
+      随.区间 = (lo, hi) => lo + 随() * (hi - lo)
+      随.高斯 = () => {
+        let u = 0
+        let v = 0
+        while (!u) u = 随()
+        while (!v) v = 随()
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
+      }
+      return 随
+    }
+
+    // ── 图标 ────────────────────────────────────────────
+    function 图标(props) {
+      const 尺 = props && props.size ? props.size : 18
+      const 亮 = props && props.active
+      return h(
+        'svg',
+        { viewBox: '0 0 24 24', width: 尺, height: 尺, 'aria-hidden': true, style: { display: 'block' } },
+        h('path', {
+          d: 'M4.6 15.2L9.2 6.7l5.1 4.7 5.1-5.4',
+          fill: 'none', stroke: 'currentColor', strokeWidth: 0.85,
+          strokeLinecap: 'round', strokeLinejoin: 'round', opacity: 亮 ? 0.5 : 0.32,
+        }),
+        h('circle', { cx: 4.6, cy: 15.2, r: 2.05, fill: 'currentColor', opacity: 亮 ? 1 : 0.72 }),
+        h('circle', { cx: 9.2, cy: 6.7, r: 1.25, fill: 'currentColor', opacity: 亮 ? 0.95 : 0.52 }),
+        h('circle', { cx: 14.3, cy: 11.4, r: 1.5, fill: 'currentColor', opacity: 亮 ? 0.9 : 0.48 }),
+        h('circle', { cx: 19.4, cy: 6, r: 1.05, fill: 'currentColor', opacity: 亮 ? 0.8 : 0.4 }),
+      )
+    }
+
+    // ── 摆位：一团散开的星云，从中间那颗往外 ──────────────
+    const 章序 = [7, 2, 3, 5, 6, 4, 8]
+    const 簇半径 = { 7: 150, 2: 215, 3: 285, 5: 350, 6: 415, 4: 475, 8: 535 }
+
+    function 摆位(星们) {
+      const n = 星们.length
+      const 号 = new Map()
+      星们.forEach((s, i) => 号.set(s.id, i))
+      const 随 = 造随机(20260816)
+      const x = new Float64Array(n)
+      const y = new Float64Array(n)
+      const z = new Float64Array(n)
+      const 本体 = new Float64Array(n).fill(12)
+
+      // ⭐ 全随机：每颗星在球体里随便一个位置，**不分章、不分团、不分区**
+      //   （用户要的：位置也随机，不是一块一块的）
+      const 半径 = 520
+      for (let i = 0; i < n; i++) {
+        // 球内均匀采样：方向均匀 + 半径按 cbrt 分布
+        const u = 随() * 2 - 1
+        const φ = Math.acos(u)
+        const θ = 随() * Math.PI * 2
+        const r = 半径 * Math.cbrt(随())
+        x[i] = Math.sin(φ) * Math.cos(θ) * r
+        y[i] = Math.cos(φ) * r
+        z[i] = Math.sin(φ) * Math.sin(θ) * r
+        const s = 星们[i]
+        // 大小：跟内容量有关，但乘一个随机数，别整齐
+        本体[i] = (s.kind === 'diary' ? 8 : 10) + Math.min(12, Math.log10(1 + String(s.text || '').length) * 5) * (0.6 + 随() * 0.9)
+      }
+
+      // ⭐ 规则（对所有档案都成立）：
+      //   1. 中心星（「我是谁」的第一条）：最大最亮
+      //   2. 每章的第一条：比普通条目大一档，好认
+      //   3. 同章的星互连最近的 2 颗 → 有脉络，不是一盘散沙
+      let 核心 = 0
+      const 章首 = new Map()
+      for (let i = 0; i < n; i++) {
+        const s = 星们[i]
+        if (s.kind !== 'card') continue
+        const c = Number(s.chapter) || 0
+        if (c && !章首.has(c)) 章首.set(c, i)
+      }
+      const 一 = 星们.findIndex((s) => s.kind === 'card' && Number(s.chapter) === 1)
+      if (一 >= 0) {
+        核心 = 一
+        x[核心] = 0
+        y[核心] = 0
+        z[核心] = 0
+        本体[核心] = 44
+      }
+      for (const [, i] of 章首) {
+        if (i === 核心) continue
+        本体[i] = Math.max(本体[i], 20)
+      }
+
+      // 同章近邻线：每颗星连到同章最近的 2 颗（太远的不连）
+      const 按章 = new Map()
+      for (let i = 0; i < n; i++) {
+        const s = 星们[i]
+        if (s.kind !== 'card' || !s.chapter) continue
+        const c = Number(s.chapter)
+        if (!按章.has(c)) 按章.set(c, [])
+        按章.get(c).push(i)
+      }
+      const 线 = []
+      const 连过 = new Set()
+      const 最远 = 210
+      for (const [c, idxs] of 按章) {
+        for (const i of idxs) {
+          const 距 = []
+          for (const j of idxs) {
+            if (j === i) continue
+            距.push([Math.hypot(x[i] - x[j], y[i] - y[j], z[i] - z[j]), j])
+          }
+          距.sort((a, b) => a[0] - b[0])
+          for (let k = 0; k < Math.min(2, 距.length); k++) {
+            const d = 距[k][0]
+            const j = 距[k][1]
+            if (d > 最远) continue
+            const 键 = i < j ? i + '-' + j : j + '-' + i
+            if (连过.has(键)) continue
+            连过.add(键)
+            线.push({ a: i, b: j, c, 距: d })
+          }
+        }
+      }
+
+      return { x, y, z, 本体, 号, 核心, 线, 线组: [], 章心: new Map(), 章表: new Map() }
+    }
+
+    // ── 贴图 ────────────────────────────────────────────
+    function 造星点(色, 尖) {
+      const c = document.createElement('canvas')
+      c.width = 64
+      c.height = 64
+      const g = c.getContext('2d')
+      const 渐 = g.createRadialGradient(32, 32, 0, 32, 32, 32)
+      渐.addColorStop(0, 'rgba(255,255,255,1)')
+      渐.addColorStop(0.12, 透明(色, 0.96))
+      渐.addColorStop(0.3, 透明(色, 0.4))
+      渐.addColorStop(0.58, 透明(色, 0.09))
+      渐.addColorStop(1, 透明(色, 0))
+      g.fillStyle = 渐
+      g.fillRect(0, 0, 64, 64)
+      if (尖) {
+        g.globalCompositeOperation = 'lighter'
+        const 横 = g.createLinearGradient(0, 32, 64, 32)
+        横.addColorStop(0, 'rgba(255,255,255,0)')
+        横.addColorStop(0.5, 'rgba(255,255,255,0.72)')
+        横.addColorStop(1, 'rgba(255,255,255,0)')
+        g.fillStyle = 横
+        g.fillRect(0, 31, 64, 2)
+        const 竖 = g.createLinearGradient(32, 0, 32, 64)
+        竖.addColorStop(0, 'rgba(255,255,255,0)')
+        竖.addColorStop(0.5, 'rgba(255,255,255,0.72)')
+        竖.addColorStop(1, 'rgba(255,255,255,0)')
+        g.fillStyle = 竖
+        g.fillRect(31, 0, 2, 64)
+      }
+      return c
+    }
+
+    function 造背景() {
+      const 随 = 造随机(911)
+      const 尘 = []
+      for (let i = 0; i < 1400; i++) {
+        尘.push({ u: 随(), v: 随(), r: 0.4 + 随() * 1.3, a: 0.04 + Math.pow(随(), 2) * 0.42 })
+      }
+      // ⚠ 星云那几团雾删了（2026-11-03）：它们是画在屏幕坐标系上的大渐变圆，
+      //   不跟星图一起缩放，看起来就是角落里几坨脏光，认不出是什么。
+      //   想加氛围就等以后做真正的渐变（贴图 + 视差），别再拿大圆糊。
+      const 云 = []
+
+      return { 尘, 云, 带宽: 随.区间(0.16, 0.22) }
+    }
+
+    const 焦 = 2400
+
+    function 投影(x, y, z, 转, 俯, 缩, 宽, 高) {
+      const c1 = Math.cos(转)
+      const s1 = Math.sin(转)
+      const X1 = x * c1 + z * s1
+      const Z1 = -x * s1 + z * c1
+      const c2 = Math.cos(俯)
+      const s2 = Math.sin(俯)
+      const Y2 = y * c2 - Z1 * s2
+      const Z2 = y * s2 + Z1 * c2
+      const k = (焦 / (焦 + Z2)) * 缩
+      return { X: 宽 / 2 + X1 * k, Y: 高 / 2 + Y2 * k, k, Z: Z2, X1, Y2 }
+    }
+
+    // ── 星图画布（主区里的一块）─────────────────────────
+    function 星图({ 图, 选中, 设选中 }) {
+      const 画布ref = useRef(null)
+      const 容器 = useRef(null)
+      const 机位 = useRef({ 转: 0.42, 俯: -0.68, 缩: 0.6, 宽: 600, 高: 500 })
+      const 拖 = useRef(null)
+      const 自动缩 = useRef(true)
+      const 位 = useRef(null)
+      const 悬停ref = useRef(null)
+      const 态ref = useRef({ 选中: null })
+      // ⭐ 底部检索栏：输入关键词，命中的星亮、其余变暗
+      const [搜, 设搜] = useState('')
+      const 搜ref = useRef('')
+
+      const 摆好 = useMemo(() => {
+        if (!图 || !图.星 || !图.星.length) return null
+        return 摆位(图.星)
+      }, [图])
+
+      useEffect(() => {
+        位.current = 摆好
+        自动缩.current = true
+      }, [摆好])
+
+      useEffect(() => {
+        态ref.current.选中 = 选中
+      }, [选中])
+
+      const 贴图 = useMemo(() => {
+        const m = {}
+        // 彩盘对应的贴图（96 色 × 正/尖）
+        m.彩 = 彩盘.map((c) => 造星点(c, false))
+        m.彩尖 = 彩盘.map((c) => 造星点(c, true))
+        for (const k of Object.keys(章色)) {
+          m[k] = 造星点(章色[k], false)
+          m[k + '尖'] = 造星点(章色[k], true)
+        }
+        for (const k of Object.keys(月色)) {
+          m['m' + k] = 造星点(月色[k], false)
+          m['m' + k + '尖'] = 造星点(月色[k], true)
+        }
+        m.默认 = 造星点('#eaf0ff', false)
+        m.默认尖 = 造星点('#eaf0ff', true)
+        return m
+      }, [])
+      const 背景 = useMemo(() => 造背景(), [])
+
+      useEffect(() => {
+        const 布 = 画布ref.current
+        if (!布) return
+        const 笔 = 布.getContext('2d')
+        let 停 = false
+        let 帧 = 0
+
+        const 定缩 = () => {
+          const p = 位.current
+          const 框 = 容器.current
+          if (!p || !框 || !自动缩.current) return
+          const { 转, 俯 } = 机位.current
+          const w = 框.clientWidth
+          const ht = 框.clientHeight
+          if (!w || !ht) return
+          let 边X = 1
+          let 边Y = 1
+          for (let i = 0; i < p.x.length; i++) {
+            const q = 投影(p.x[i], p.y[i], p.z[i], 转, 俯, 1, 0, 0)
+            const k = 焦 / (焦 + q.Z)
+            边X = Math.max(边X, Math.abs(q.X1 * k))
+            边Y = Math.max(边Y, Math.abs(q.Y2 * k))
+          }
+          机位.current.缩 = Math.min((0.48 * w) / 边X, (0.48 * ht) / 边Y)
+        }
+
+        const 量尺寸 = () => {
+          const 框 = 容器.current
+          if (!框) return
+          const dpr = Math.min(window.devicePixelRatio || 1, 2)
+          const w = 框.clientWidth
+          const ht = 框.clientHeight
+          机位.current.宽 = w
+          机位.current.高 = ht
+          布.width = Math.max(1, Math.floor(w * dpr))
+          布.height = Math.max(1, Math.floor(ht * dpr))
+          布.style.width = w + 'px'
+          布.style.height = ht + 'px'
+          笔.setTransform(dpr, 0, 0, dpr, 0, 0)
+          定缩()
+        }
+        量尺寸()
+        const 观 = new ResizeObserver(量尺寸)
+        if (容器.current) 观.observe(容器.current)
+
+      // ⭐ 自己慢慢转：不拖的时候每帧转一点点（一圈约 4 分钟，几乎察觉不到但一直是活的）
+      //   拖着、或者正悬停在某颗星上时停转，免得看的时候在动
+      const 自转 = () => {
+      if (拖.current || 悬停ref.current) return
+      机位.current.转 += 0.00016
+      }
+
+        const 画 = () => {
+          if (停) return
+          自转()   // 自己慢慢转，拖着/悬停时停
+          const { 转, 俯, 缩, 宽, 高 } = 机位.current
+          const p = 位.current
+          const 数 = 图
+          const 态 = 态ref.current
+          笔.clearRect(0, 0, 宽, 高)
+
+          // 银河带
+          笔.save()
+          笔.translate(宽 / 2, 高 / 2)
+          笔.rotate(-0.34)
+          const 带 = 笔.createLinearGradient(0, -高 * 背景.带宽, 0, 高 * 背景.带宽)
+          带.addColorStop(0, 'rgba(120,150,220,0)')
+          带.addColorStop(0.5, 'rgba(150,175,235,0.05)')
+          带.addColorStop(1, 'rgba(120,150,220,0)')
+          笔.fillStyle = 带
+          笔.fillRect(-宽, -高, 宽 * 2, 高 * 2)
+          笔.restore()
+
+          笔.globalCompositeOperation = 'lighter'
+          for (let ci = 0; ci < 背景.云.length; ci++) {
+            const 云 = 背景.云[ci]
+            const 漂 = performance.now() / 1000
+            const cx = ((云.u + Math.sin(漂 * 0.06 + ci) * 0.02) % 1) * 宽
+            const cy = ((云.v + Math.cos(漂 * 0.05 + ci * 1.7) * 0.017) % 1) * 高
+            const r = 云.半径 * Math.min(宽, 高)
+            const g = 笔.createRadialGradient(cx, cy, 0, cx, cy, r)
+            const 呼吸 = 0.80 + 0.20 * Math.sin(漂 * 0.28 + ci * 1.3)
+            g.addColorStop(0, 透明(云.色, 云.强 * 呼吸))
+            g.addColorStop(1, 透明(云.色, 0))
+            笔.fillStyle = g
+            笔.beginPath()
+            笔.arc(cx, cy, r, 0, Math.PI * 2)
+            笔.fill()
+          }
+          // ── 动态背景 ──────────────────────────────────────
+          //   · 星尘自己缓慢流动（跟镜头无关，镜头动时再叠一层视差）
+          //   · 每颗微尘按自己的相位呼吸，像夜里慢慢闪的星
+          //   · 星云极慢地漂移 + 明暗起伏
+          const 秒 = performance.now() / 1000
+          笔.fillStyle = '#cfe0ff'
+          for (let k = 0; k < 背景.尘.length; k++) {
+            const s = 背景.尘[k]
+            const px = (((s.u + 转 * 0.015 + 秒 * 0.022) % 1) + 1) % 1
+            const py = (((s.v + 俯 * 0.02 + 秒 * 0.016 + 1) % 1) + 1) % 1
+            const 闪 = 0.62 + 0.38 * Math.sin(秒 * (0.35 + (k % 11) * 0.03) + k * 2.1)
+            笔.globalAlpha = Math.min(0.85, s.a * (0.55 + 0.75 * 闪))
+            笔.fillRect(px * 宽, py * 高, s.r * (0.85 + 0.3 * 闪), s.r * (0.85 + 0.3 * 闪))
+          }
+          笔.globalAlpha = 1
+
+          if (p && 数) {
+            const 时 = performance.now()
+            const n = 数.星.length
+            const 投 = new Array(n)
+            for (let i = 0; i < n; i++) 投[i] = 投影(p.x[i], p.y[i], p.z[i], 转, 俯, 缩, 宽, 高)
+            const 核 = 投[p.核心] || 投影(0, 0, 0, 转, 俯, 缩, 宽, 高)
+            const 核r = Math.max(120, 180 * 缩 * (0.96 + 0.04 * Math.sin(performance.now() / 2600)))
+            const 核光 = 笔.createRadialGradient(核.X, 核.Y, 0, 核.X, 核.Y, 核r)
+            核光.addColorStop(0, 'rgba(205,228,255,0.34)')
+            核光.addColorStop(0.3, 'rgba(140,185,255,0.12)')
+            核光.addColorStop(1, 'rgba(60,100,180,0)')
+            笔.fillStyle = 核光
+            笔.beginPath()
+            笔.arc(核.X, 核.Y, 核r, 0, Math.PI * 2)
+            笔.fill()
+
+            const 焦点 = 态.选中 || 悬停ref.current
+            // 焦点星的「邻居」：同章线 + 共享桥牵过手的
+            // ⚠ 邻居**一律按星的 id 认**，不要混用数组下标：
+            //   数.线 的下标是「摆位后」的，图.桥 的下标是「出图时」的，两套对不上，
+            //   混用就会「该亮的被压暗、不相干的被点亮」（用户看到的就是这个）。
+            let 邻 = null
+            let 焦号 = -1
+            if (焦点) {
+              邻 = new Set([焦点])
+              const 取号 = (i) => {
+                const st = 数.星 && 数.星[i]
+                return st ? st.id : null
+              }
+              const 取桥号 = (i) => {
+                const st = (数.星 && 数.星[i]) || (图.星 && 图.星[i])
+                return st ? st.id : null
+              }
+              if (数.号) 焦号 = 数.号.get(焦点) === undefined ? -1 : 数.号.get(焦点)
+              for (const l of 数.线 || []) {
+                if (l.a === 焦号) 邻.add(取号(l.b))
+                if (l.b === 焦号) 邻.add(取号(l.a))
+              }
+              for (const b of 图.桥 || []) {
+                if (取桥号(b.a) === 焦点) 邻.add(取桥号(b.b))
+                if (取桥号(b.b) === 焦点) 邻.add(取桥号(b.a))
+              }
+            }
+
+            // ⭐ 章球 → 章下每一颗小球：一根线连回去，像星座挂在它那颗主星上
+            if (数.线组 && 数.线组.length) {
+              const 焦点章 = (() => {
+                const 焦 = 数.星 && 焦点 ? 数.星[数.号.get(焦点)] : null
+                return 焦 && 焦.kind === 'card' ? Number(焦.chapter || 0) : 0
+              })()
+              for (const 组 of 数.线组) {
+                const 亮 = 焦点章 !== 0 && 焦点章 === 组.c
+                const 色 = 章色[组.c] || '#b9c6e8'
+                const 心投 = 投影(组.心[0], 组.心[1], 组.心[2], 转, 俯, 缩, 宽, 高)
+                笔.strokeStyle = 亮 ? 透明(色, 0.7) : 透明(色, 0.16)
+                笔.lineWidth = 亮 ? 1.2 : 0.7
+                for (const i of 组.标) {
+                  const q = 投[i]
+                  笔.beginPath()
+                  笔.moveTo(心投.X, 心投.Y)
+                  笔.lineTo(q.X, q.Y)
+                  笔.stroke()
+                }
+              }
+            }
+
+            // ⭐ 同章近邻线：同一章的星连最近的几颗，淡淡的，有脉络
+            if (数.线 && 数.线.length) {
+              for (const l of 数.线) {
+                const a = 投[l.a]
+                const b = 投[l.b]
+                if (!a || !b) continue
+                const 亮 = 焦点 && (数.星[l.a].id === 焦点 || 数.星[l.b].id === 焦点)
+                笔.strokeStyle = 亮 ? 'rgba(200,222,255,0.62)' : 'rgba(160,190,240,0.20)'
+                笔.lineWidth = 亮 ? 1.5 : 0.8
+                笔.beginPath()
+                笔.moveTo(a.X, a.Y)
+                笔.lineTo(b.X, b.Y)
+                笔.stroke()
+              }
+            }
+
+            // ⭐ 共享桥：两颗星提到同一个少见的词（「平潭」「小娇娇」那种）就牵一根橙线。
+            //   默认极淡，点某颗星时才把它那几根亮起来。
+            if (图.桥 && 图.桥.length) {
+              for (const b of 图.桥) {
+                const ia = 数.号 ? 数.号.get(数.星[b.a] && 数.星[b.a].id) : undefined
+                const ib = 数.号 ? 数.号.get(数.星[b.b] && 数.星[b.b].id) : undefined
+                const a = ia === undefined ? b.a : ia
+                const c = ib === undefined ? b.b : ib
+                if (a === undefined || c === undefined) continue
+                if (投[a] === undefined || 投[c] === undefined) continue
+                const 亮 = 焦点 && (数.星[a].id === 焦点 || 数.星[c].id === 焦点)
+                if (!亮 && 焦点) continue
+                笔.strokeStyle = 亮 ? 'rgba(255,198,130,0.7)' : 'rgba(255,190,120,0.18)'
+                笔.lineWidth = 亮 ? 1.4 : 0.75
+                笔.beginPath()
+                笔.moveTo(投[a].X, 投[a].Y)
+                笔.lineTo(投[c].X, 投[c].Y)
+                笔.stroke()
+              }
+            }
+
+            if (焦点 && 数.线) {
+              笔.lineWidth = 1.2
+              for (const l of 数.线) {
+                if (l.a !== 焦点 && l.b !== 焦点) continue
+                if (l.type !== 'ref' && l.type !== 'similar') continue
+                const a = p.号.get(l.a)
+                const b = p.号.get(l.b)
+                if (a === undefined || b === undefined) continue
+                笔.strokeStyle = l.type === 'ref' ? 'rgba(255,200,130,0.42)' : 'rgba(255,255,255,0.3)'
+                笔.setLineDash(l.type === 'ref' ? [2, 4] : [])
+                笔.beginPath()
+                笔.moveTo(投[a].X, 投[a].Y)
+                笔.lineTo(投[b].X, 投[b].Y)
+                笔.stroke()
+              }
+              笔.setLineDash([])
+            }
+
+            const 顺序 = []
+            for (let i = 0; i < n; i++) 顺序.push(i)
+            顺序.sort((a, b) => 投[b].Z - 投[a].Z)
+            for (const i of 顺序) {
+              const 星 = 数.星[i]
+              const q = 投[i]
+              const 色 = 星色(星)
+              const 月 = Number((星.date || '').slice(5, 7))
+              const 键基 = 星.kind === 'card' ? String(星.chapter || 99) : 'm' + 月
+              const 本体 = p.本体[i]
+              // ⭐ 分层：分支（星册）带十字光，日记只是柔光点，一眼能分开
+              const 尖 = 星.kind === 'card' && (i === p.核心 || 本体 >= 15)
+              // 中心星固定白色（最亮那颗），其余走随机彩盘
+              const 图块 =
+                i === p.核心
+                  ? 贴图.默认尖
+                  : (贴图[尖 ? '彩尖' : '彩'] && 贴图[尖 ? '彩尖' : '彩'][彩号(星)]) ||
+                    贴图[键基 + (尖 ? '尖' : '')] ||
+                    贴图.默认
+              const 深 = 焦 / (焦 + q.Z)
+              // ⭐ 能量：越新越亮，越久越暗（化石态是「暗但不消失」）
+              const 天 = 星.时 ? (Date.now() - 星.时) / 86400000 : 120
+              const 能量 = 0.42 + 0.58 * Math.exp(-Math.max(0, 天) / 110)
+              // ⭐ 呼吸：每颗星按自己的相位轻微明灭（周期 4~7 秒，幅度只有 8%）
+              const 呼 = 0.92 + 0.08 * Math.sin(时 / 1000 * (0.9 + (i % 7) * 0.06) + i * 1.7)
+              // 检索：有词的时候，命中的保持原样，不命中的压到很暗
+              const 词 = 搜ref.current.trim()
+              const 命中 = 词
+                ? String(星.title || '').includes(词) || String(星.text || '').includes(词)
+                : true
+              let 大小 = Math.max(7, 本体 * (0.8 + 0.5 * 缩) * 深 * 呼)
+              if (词 && !命中) 大小 *= 0.55
+              if (星.kind !== 'card') 大小 *= 0.85      // 日记整体再收一点，跟分支拉开
+              // 关联的星：稍微大一点（光晕太丑，去掉）
+              if (邻 && 邻.has(星.id) && 星.id !== 焦点) 大小 *= 1.12
+              if (态.选中 === 星.id) 大小 *= 1.7
+              else if (悬停ref.current === 星.id) 大小 *= 1.3
+              笔.globalAlpha =
+                Math.min(1, (0.84 + 深 * 0.22) * 呼 * 能量) *
+                (词 && !命中 ? 0.22 : 1) *
+                // 聚焦时：关联的亮起来，别的一起暗下去（暗才看得清）
+                (邻 ? (邻.has(星.id) ? 1 : 0.32) : 1)
+              笔.drawImage(图块, q.X - 大小 / 2, q.Y - 大小 / 2, 大小, 大小)
+              void 色
+            }
+            笔.globalAlpha = 1
+            笔.globalCompositeOperation = 'source-over'
+
+            if (态.选中 && p.号.get(态.选中) !== undefined) {
+              const q = 投[p.号.get(态.选中)]
+              笔.strokeStyle = 'rgba(170,215,255,0.9)'
+              笔.lineWidth = 1.3
+              笔.beginPath()
+              笔.arc(q.X, q.Y, 13, 0, Math.PI * 2)
+              笔.stroke()
+            }
+          } else {
+            // 没有档案：一颗几乎熄掉的星
+            笔.globalCompositeOperation = 'lighter'
+            const 暗 = 笔.createRadialGradient(宽 / 2, 高 / 2, 0, 宽 / 2, 高 / 2, 26)
+            暗.addColorStop(0, 'rgba(150,170,210,0.5)')
+            暗.addColorStop(0.35, 'rgba(120,145,200,0.16)')
+            暗.addColorStop(1, 'rgba(100,130,190,0)')
+            笔.fillStyle = 暗
+            笔.beginPath()
+            笔.arc(宽 / 2, 高 / 2, 26, 0, Math.PI * 2)
+            笔.fill()
+            笔.globalCompositeOperation = 'source-over'
+            笔.fillStyle = 'rgba(150,170,210,0.55)'
+            笔.beginPath()
+            笔.arc(宽 / 2, 高 / 2, 1.8, 0, Math.PI * 2)
+            笔.fill()
+          }
+
+          // 悬停标签
+          if (悬停ref.current && p && 数) {
+            const i = p.号.get(悬停ref.current)
+            if (i !== undefined) {
+              const q = 投影(p.x[i], p.y[i], p.z[i], 转, 俯, 缩, 宽, 高)
+              const 文 = (数.星[i].title || '').slice(0, 20)
+              笔.font = '12px "PingFang SC","Microsoft YaHei",system-ui,sans-serif'
+              const w = 笔.measureText(文).width + 14
+              const bx = Math.min(q.X + 10, 宽 - w - 4)
+              笔.fillStyle = 'rgba(8,12,22,0.86)'
+              笔.beginPath()
+              笔.roundRect(bx, q.Y - 24, w, 20, 5)
+              笔.fill()
+              笔.fillStyle = 'rgba(226,236,255,0.95)'
+              笔.fillText(文, bx + 7, q.Y - 10)
+            }
+          }
+
+          帧 = requestAnimationFrame(画)
+        }
+        帧 = requestAnimationFrame(画)
+        return () => {
+          停 = true
+          cancelAnimationFrame(帧)
+          观.disconnect()
+        }
+      }, [图, 摆好, 贴图, 背景])
+
+      const 取最近 = useCallback(
+        (px, py) => {
+          const p = 位.current
+          if (!p || !图) return null
+          const { 转, 俯, 缩, 宽, 高 } = 机位.current
+          let 最近 = null
+          let 最近距 = 16
+          for (let i = 0; i < 图.星.length; i++) {
+            const q = 投影(p.x[i], p.y[i], p.z[i], 转, 俯, 缩, 宽, 高)
+            const d = Math.hypot(q.X - px, q.Y - py)
+            if (d < 最近距) {
+              最近距 = d
+              最近 = 图.星[i]
+            }
+          }
+          return 最近
+        },
+        [图],
+      )
+
+      const 按下 = (e) => {
+        拖.current = { x: e.clientX, y: e.clientY, 转: 机位.current.转, 俯: 机位.current.俯, 动: false }
+      }
+      const 移动 = (e) => {
+        const 布 = 画布ref.current
+        if (!布) return
+        const r = 布.getBoundingClientRect()
+        const d = 拖.current
+        if (d) {
+          const dx = e.clientX - d.x
+          const dy = e.clientY - d.y
+          if (Math.abs(dx) + Math.abs(dy) > 3) d.动 = true
+          机位.current.转 = d.转 + dx * 0.006
+          机位.current.俯 = Math.max(-1.35, Math.min(1.35, d.俯 + dy * 0.005))
+          return
+        }
+        const 星 = 取最近(e.clientX - r.left, e.clientY - r.top)
+        悬停ref.current = 星 ? 星.id : null
+        布.style.cursor = 星 ? 'pointer' : 'grab'
+      }
+      const 松开 = (e) => {
+        const d = 拖.current
+        拖.current = null
+        if (d && !d.动) {
+          const 布 = 画布ref.current
+          const r = 布.getBoundingClientRect()
+          const 星 = 取最近(e.clientX - r.left, e.clientY - r.top)
+          设选中(星 ? 星.id : null)
+        }
+      }
+      const 滚轮 = (e) => {
+        e.preventDefault()
+        自动缩.current = false
+        机位.current.缩 = Math.max(0.2, Math.min(3.4, 机位.current.缩 * (e.deltaY > 0 ? 0.92 : 1.08)))
+      }
+
+      useEffect(() => {
+        const 布 = 画布ref.current
+        if (!布) return
+        布.addEventListener('wheel', 滚轮, { passive: false })
+        return () => 布.removeEventListener('wheel', 滚轮)
+      }, [])
+
+      return h('div', { ref: 容器, style: { position: 'absolute', inset: 0, overflow: 'hidden' } },
+        h('canvas', {
+          ref: 画布ref,
+          style: { display: 'block' },
+          onMouseDown: 按下,
+          onMouseMove: 移动,
+          onMouseUp: 松开,
+          onMouseLeave: () => {
+            拖.current = null
+            悬停ref.current = null
+          },
+        }),
+        // ⭐ 底部检索栏：搜标题或正文，命中的亮、别处变暗
+        h('div', {
+          style: {
+            position: 'absolute', left: '50%', bottom: 18, transform: 'translateX(-50%)',
+            display: 'flex', alignItems: 'center', gap: 8,
+            background: 'rgba(12,18,32,0.82)', border: '1px solid rgba(140,170,230,0.16)',
+            borderRadius: 10, padding: '6px 10px', backdropFilter: 'blur(8px)',
+          },
+        },
+          h('span', { style: { fontSize: 12, opacity: 0.4 } }, '⌕'),
+          h('input', {
+            value: 搜,
+            placeholder: '搜关键词…',
+            spellCheck: false,
+            onChange: (e) => {
+              设搜(e.target.value)
+              搜ref.current = e.target.value
+            },
+            style: {
+              width: 190, fontSize: 12, fontFamily: 'inherit', color: '#dbe6ff',
+              background: 'transparent', border: 'none', outline: 'none',
+            },
+          }),
+          搜
+            ? h('button', {
+                style: { ...小按钮, padding: '2px 8px' },
+                onClick: () => {
+                  设搜('')
+                  搜ref.current = ''
+                },
+              }, '清')
+            : null))
+    }
+
+    // ── 列表（档案 / 日记共用）───────────────────────────
+    function 列表页({ 星们, 空话, 选中, 设选中 }) {
+      if (!星们.length) {
+        return h('div', { style: { ...居中, color: 'rgba(226,236,255,0.45)', fontSize: 12.5 } }, 空话)
+      }
+      return h('div', { style: { position: 'absolute', inset: 0, overflowY: 'auto', padding: '14px 18px' } },
+        星们.map((s) =>
+          h('div', {
+            key: s.id,
+            onClick: () => 设选中(s.id),
+            style: {
+              padding: '10px 12px',
+              marginBottom: 6,
+              borderRadius: 9,
+              cursor: 'pointer',
+              background: 选中 === s.id ? 'rgba(140,170,230,0.16)' : 'rgba(140,170,230,0.05)',
+              border: '1px solid ' + (选中 === s.id ? 'rgba(140,170,230,0.35)' : 'transparent'),
+            },
+          },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+              h('i', { style: { width: 6, height: 6, borderRadius: 99, background: 星色(s), flex: 'none' } }),
+              h('span', { style: { fontSize: 12.5, fontWeight: 600, flex: 1 } }, s.title),
+              s.date && s.date.length >= 10
+                ? h('span', { style: { fontSize: 10.5, opacity: 0.4 } }, s.date)
+                : null),
+            h('div', { style: { fontSize: 11.5, opacity: 0.45, marginTop: 4, lineHeight: 1.6 } },
+              (s.text || '').replace(/[*#>`]/g, '').replace(/\s+/g, ' ').slice(0, 70) || '（空）'),
+          ),
+        ))
+    }
+
+    // ── 星坊：定规矩的地方（模型 / 文件夹 / 定时 / 关键词）──
+    //    ⚠ 这里**不显示「还没拾多少天」**（2026-11-03 她定的）：
+    //      档案会自己变（大肥鱼自己写日记就会变），「还没拾」是动作的属性，
+    //      不是这一页的属性 —— 那个数字归「拾星」自己管。
+    function 星坊页({ 会话, 图, 刷新, 会话们 }) {
+      const [模, 设模] = useState(null)
+      const [改夹, 设改夹] = useState(null)
+      // ⚠ 「改」= 手填。这条是唯一验证过能用的（她那两次都是这么填的）。
+      //   弹窗那条（客户端 remote）还没接通，不许再挡在主路上。
+      // 「改」= 弹系统那个选文件夹窗口（她要的是这个）
+      const 选夹 = async () => {
+        const 成了 = await 弹窗选夹()
+        // ⚠ 只有**真失败**才退成输入框。原来不管成没成都退，
+        //   结果存成功后输入框又冒出来、还填着旧路径，看着像"没存上"。
+        if (成了 === false) 设改夹(会话 && 会话.目录 ? 会话.目录 : '')
+      }
+
+      const 弹窗选夹 = async () => {
+        // ⭐ DSH 客户端本来就有选目录的能力（设置页那些「浏览…」就是它）——
+        //   必须在这边调，宿主那头调不到。
+        try {
+          const r = await fetch('/dsh-startide/pickdir', { method: 'POST' })
+          const j = await r.json()
+          if (j.ok && j.目录) return 存夹(j.目录)   // 存夹 会返回 true / false
+          设跑({ ok: false, 原因: '系统窗口没给出路径：' + String(j.原因 || '') + '（可以手填）' })
+          return false
+        } catch (e) {
+          设跑({ ok: false, 原因: '系统窗口弹不出来（可以手填）' })
+          return false
+        }
+      }
+
+      const 存夹 = async (路径) => {
+        const p = String(路径 || '').trim()
+        try {
+          const r = await fetch('/dsh-startide/bind', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sid: 会话 && 会话.id, 目录: p }),
+          })
+          const j = await r.json()
+          if (!j.ok) {
+            设跑({ ok: false, 原因: '存不上：' + String(j.原因 || '') })
+            return false
+          }
+          设改夹(null)
+          刷新 && 刷新()
+          return true
+        } catch (e) {
+          设跑({ ok: false, 原因: '存不上：' + String((e && e.message) || e) })
+          return false
+        }
+      }
+      useEffect(() => {
+        fetch('/dsh-startide/models', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((j) => 设模(j))
+          .catch(() => 设模({ 错: '读不到模型列表' }))
+      }, [])
+      const 换模型 = (provider, model) => {
+        fetch('/dsh-startide/models', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ provider, model }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((j) => j && 设模(j))
+          .catch(() => {})
+      }
+
+      const 选中 = (模 && (模.选中的 || 模.默认)) || null
+      const 当前家 = 选中 && 模 ? (模.providers || []).find((p) => p.id === 选中.provider) : null
+
+      const 行 = (标, 值, 注) =>
+        h('div', { style: 行式 },
+          h('span', { style: 标式 }, 标),
+          h('span', { style: 值式 }, 值 || '—'),
+          注 ? h('span', { style: 注式 }, 注) : null)
+
+      const 卡 = (标题, 副, 内容们) =>
+        h('div', { style: 卡片 },
+          h('div', { style: { fontSize: 12.5, fontWeight: 600, letterSpacing: 0.3 } }, 标题),
+          h('div', { style: { fontSize: 11, opacity: 0.3, marginTop: 3, marginBottom: 12, lineHeight: 1.6 } }, 副),
+          内容们)
+
+      const 下拉 = { fontSize: 11.5, padding: '4px 8px', borderRadius: 6, fontFamily: 'inherit',
+        background: 'rgba(20,30,52,0.95)', color: '#dbe6ff', border: '1px solid rgba(140,170,230,0.24)',
+        colorScheme: 'dark' }   // ⭐ 不加这句，系统弹出的列表是白底，字看不清
+      const 选项 = { background: '#101a2e', color: '#dbe6ff' }
+
+      // ── 日记定时 ───────────────────────────────────────
+      const [日设, 设日] = useState(null)
+      useEffect(() => {
+        fetch('/dsh-startide/diary', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((j) => 设日(j && j.写日记 ? j.写日记 : { 开: true, 时: 23, 分: 30, 会话: '' }))
+          .catch(() => 设日({ 开: true, 时: 23, 分: 30, 会话: '' }))
+      }, [])
+      const 存日 = async (改) => {
+        const 新 = { ...(日设 || {}), ...改 }
+        设日(新)
+        try {
+          await fetch('/dsh-startide/diary', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(新),
+          })
+        } catch (e) {}
+      }
+      const 时串 = 日设 ? String(日设.时).padStart(2, '0') + ':' + String(日设.分).padStart(2, '0') : ''
+
+      const 日记卡 = 卡('写日记', '到点往那个会话里递一句话，它自己写进去', [
+        h('div', { style: { ...行式, borderTop: 'none', paddingTop: 2 } },
+          h('span', { style: 标式 }, '几点'),
+          h('input', {
+            type: 'time',
+            value: 时串,
+            onChange: (e) => {
+              const v = String(e.target.value || '')
+              if (!v) return
+              const [a, b] = v.split(':')
+              存日({ 时: Number(a), 分: Number(b) })
+            },
+            style: { ...下拉, colorScheme: 'dark', width: 96 },
+          }),
+          h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', flex: 'none' } },
+            h('input', {
+              type: 'checkbox',
+              checked: Boolean(日设 && 日设.开),
+              onChange: (e) => 存日({ 开: e.target.checked }),
+              style: { width: 14, height: 14, cursor: 'pointer', accentColor: '#7cc4ff' },
+            }),
+            h('span', { style: { fontSize: 11.5, opacity: 0.7 } }, '开着'))),
+        h('div', { style: 行式 },
+          h('span', { style: 标式 }, '交给'),
+          h('select', {
+            value: (日设 && 日设.会话) || '',
+            onChange: (e) => 存日({ 会话: e.target.value }),
+            style: { ...下拉, flex: 1, minWidth: 0, colorScheme: 'dark' },
+          }, [h('option', { key: '', value: '' }, '（还没选）')].concat(
+            (会话们 || []).filter((x) => x.id && !x.本机).map((x) =>
+              h('option', { key: x.id, value: x.id }, String(x.名 || x.id).slice(0, 40))),
+          ))),
+      ])
+
+
+      const 模型行 = h('div', { style: { ...行式, borderTop: 'none', paddingTop: 2 } },
+        h('span', { style: 标式 }, '模型'),
+        !模
+          ? h('span', { style: { fontSize: 12, opacity: 0.4 } }, '正在读…')
+          : 模.错
+            ? h('span', { style: { fontSize: 12, color: '#ff9b8a' } }, 模.错)
+            : h('span', { style: { display: 'flex', gap: 6, flex: 1 } },
+                h('select', {
+                  value: 选中 ? 选中.provider : '',
+                  onChange: (e) => {
+                    const p = (模.providers || []).find((x) => x.id === e.target.value)
+                    const m = p && p.models && p.models[0] ? p.models[0].id : ''
+                    换模型(e.target.value, m)
+                  },
+                  style: 下拉,
+                }, (模.providers || []).map((p) => h('option', { key: p.id, value: p.id, style: 选项 }, p.name))),
+                h('select', {
+                  value: 选中 ? 选中.model : '',
+                  onChange: (e) => 换模型(选中 ? 选中.provider : '', e.target.value),
+                  style: 下拉,
+                }, ((当前家 && 当前家.models) || []).map((m) => h('option', { key: m.id, value: m.id, style: 选项 }, m.name))),
+              ),
+        模 && 模.选中的 ? null : h('span', { style: { fontSize: 10.5, opacity: 0.3, flex: 'none' } }, '还没选，用默认'),
+      )
+
+      const [跑, 设跑] = useState(null)
+      const 开始 = async () => {
+        if (!会话 || !会话.id) return
+        设跑('跑')
+        try {
+          const r = await fetch('/dsh-startide/pick', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sid: 会话.id }),
+          })
+          const j = await r.json()
+          设跑(j)
+        } catch (e) {
+          设跑({ ok: false, 原因: String((e && e.message) || e) })
+        }
+      }
+      const 跑着 = 跑 === '跑'
+
+      return h('div', { style: { position: 'absolute', inset: 0, overflowY: 'auto', padding: '26px 30px' } },
+        h('div', { style: { maxWidth: 620 } },
+          卡('现在这个会话', '星图、星册、星历画的就是它', [
+            行('会话', 会话 && 会话.名, 会话 && 会话.有 ? (会话.字 / 10000).toFixed(1) + ' 万字' : '还没建档'),
+            h('div', { style: { ...行式, alignItems: 'center' } },
+              h('span', { style: 标式 }, '文件夹'),
+              !会话
+                ? h('span', { style: 值式 }, '—')
+                : 改夹 === null
+                  ? h('span', { style: 值式, title: 会话.目录 }, 会话.目录 || '（还没定）')
+                  : h('input', {
+                      value: 改夹,
+                      onChange: (e) => 设改夹(e.target.value),
+                      placeholder: '例如 D:\\大肥鱼',
+                      spellCheck: false,
+                      style: {
+                        flex: 1, minWidth: 0, fontSize: 12, fontFamily: 'inherit',
+                        padding: '5px 9px', borderRadius: 6, color: '#dbe6ff',
+                        background: 'rgba(20,30,52,0.95)', border: '1px solid rgba(140,170,230,0.28)',
+                        outline: 'none',
+                      },
+                    }),
+              会话
+                ? 改夹 === null
+                  ? h('span', { style: { display: 'flex', gap: 6, flex: 'none' } },
+                      h('button', { style: { ...小按钮, padding: '4px 10px' }, onClick: 选夹 }, '改'),
+                      h('button', { style: { ...小按钮, padding: '4px 10px' }, onClick: 弹窗选夹 }, '选…'))
+                  : h('span', { style: { display: 'flex', gap: 6, flex: 'none' } },
+                      h('button', { style: { ...小按钮, padding: '4px 10px' }, onClick: () => 存夹(改夹) }, '存'),
+                      h('button', { style: { ...小按钮, padding: '4px 10px' }, onClick: () => 设改夹(null) }, '取消'))
+                : null),
+            行('现有', 图 && !图.空 ? `${图.统计.星} 颗星 · ${图.统计.卡} 分支 · ${图.统计.日} 天` : '空'),
+          ]),
+           卡('拾星', 会话 && 会话.没跑完
+            ? '上次没跑完：整理到 ' + (会话.没跑完.已到 || '还没开始') + '，目标到 ' + 会话.没跑完.最晚
+            : '把会话里还没进档案的日子拾出来，写进上面那个文件夹', [
+            模型行,
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginTop: 14 } },
+              h('button', {
+                onClick: 开始,
+                disabled: 跑着 || !(会话 && 会话.id),
+                style: { ...主按钮, ...(跑着 || !(会话 && 会话.id) ? { opacity: 0.4, cursor: 'not-allowed' } : {}) },
+              }, 跑着 ? '正在开…' : (会话 && 会话.没跑完 ? '接着拾' : '拾星')),
+              h('span', { style: { fontSize: 11, opacity: 0.35, lineHeight: 1.6 } },
+                跑着 ? '在切料、开新会话' : 会话 && !会话.有 ? '还没有档案，拾完就有了' : '会新开一个会话，让它一天一天往下做')),
+            跑 && 跑 !== '跑'
+              ? h('div', { style: { marginTop: 12, fontSize: 11.5, lineHeight: 1.8, color: 跑.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
+                  跑.ok
+                    ? `开好了：切了 ${跑.天数} 天（${跑.最早} ~ ${跑.最晚}），新会话已经领到活儿。`
+                    : String(跑.原因 || '没跑成'))
+              : null,
+          ]),
+          日记卡,
+        ))
+    }
+
+    function 说重(字) {
+      const n = Number(字) || 0
+      if (!n) return '还没建档'
+      if (n >= 10000) return (n / 10000).toFixed(1) + ' 万字'
+      return n + ' 字'
+    }
+
+    // ═══════════════════════════════════════════════════
+    function 星汐() {
+      const [会话们, 设会话们] = useState([])
+      const [当前, 设当前] = useState('')
+      const [图, 设图] = useState(null)
+      const [页, 设页] = useState('图')
+      const [选中, 设选中] = useState(null)
+      const [错, 设错] = useState('')
+      const [加载, 设加载] = useState(true)
+
+      const 拉会话 = useCallback(async () => {
+        try {
+          const r = await fetch('/dsh-startide/sessions', { cache: 'no-store' })
+          if (!r.ok) throw new Error('宿主没回应（' + r.status + '）')
+          const j = await r.json()
+          设会话们(j.会话 || [])
+          设当前((旧) => (旧 && (j.会话 || []).some((x) => x.id === 旧) ? 旧 : (j.会话 && j.会话[0] ? j.会话[0].id : '')))
+        } catch (e) {
+          设错(String((e && e.message) || e))
+        }
+      }, [])
+
+      const 拉图 = useCallback(async (sid) => {
+        if (!sid) {
+          设图(null)
+          设加载(false)
+          return
+        }
+        设加载(true)
+        try {
+          const r = await fetch('/dsh-startide/graph?sid=' + encodeURIComponent(sid), { cache: 'no-store' })
+          if (!r.ok) throw new Error('宿主没回应（' + r.status + '）')
+          const j = await r.json()
+          if (j.错) throw new Error(j.错)
+          设图(j)
+          设错('')
+        } catch (e) {
+          设错(String((e && e.message) || e))
+          设图(null)
+        } finally {
+          设加载(false)
+        }
+      }, [])
+
+      useEffect(() => {
+        拉会话()
+      }, [拉会话])
+
+      useEffect(() => {
+        拉图(当前)
+        设选中(null)
+      }, [当前, 拉图])
+
+      const 本站 = useMemo(() => {
+        if (!图) return []
+        return 图.星 || []
+      }, [图])
+
+      const 卡们 = useMemo(() => 本站.filter((s) => s.kind === 'card'), [本站])
+      const 日们 = useMemo(
+        () => 本站.filter((s) => s.kind === 'diary').slice().sort((a, b) => (a.date < b.date ? 1 : -1)),
+        [本站],
+      )
+      const 选中星 = useMemo(() => 本站.find((s) => s.id === 选中) || null, [本站, 选中])
+      const 现在会话 = 会话们.find((x) => x.id === 当前) || null
+
+      return h('div', { style: 外层 },
+        // 顶栏
+        h('div', { style: 顶栏 },
+          h('span', { style: { fontSize: 15, fontWeight: 600, letterSpacing: 1, marginRight: 18 } }, '星汐'),
+          [['图', '星图'], ['档案', '星册'], ['日记', '星历'], ['坊', '星坊']].map(([k, 名]) =>
+            h('button', {
+              key: k,
+              onClick: () => 设页(k),
+              style: {
+                ...页签,
+                color: 页 === k ? '#dff0ff' : 'rgba(226,236,255,0.5)',
+                background: 页 === k ? 'rgba(140,170,230,0.18)' : 'transparent',
+              },
+            }, 名)),
+          h('span', { style: { flex: 1 } }),
+          错 ? h('span', { style: { color: '#ff9b8a', fontSize: 11.5, marginRight: 10 } }, 错) : null,
+          h('span', { style: { fontSize: 11.5, opacity: 0.4 } },
+            (现在会话 ? 现在会话.名 + ' · ' : '') + (图 && !图.空 ? 图.统计.星 + ' 颗星' : '还没有星')),
+        ),
+        // 主体
+        h('div', { style: { flex: 1, display: 'flex', minHeight: 0 } },
+          h('div', { style: { position: 'relative', flex: 1, minWidth: 0 } },
+            加载 ? h('div', { style: 居中 }, h('span', { style: { fontSize: 12.5, opacity: 0.5 } }, '正在把档案摊开…')) : null,
+            页 === '图'
+              ? h(星图, { 图, 选中, 设选中 })
+              : null,
+            页 === '档案'
+              ? h(列表页, { 星们: 卡们, 空话: '这个会话还没有档案', 选中, 设选中 })
+              : null,
+            页 === '日记'
+              ? h(列表页, { 星们: 日们, 空话: '这个会话还没有日记', 选中, 设选中 })
+              : null,
+            页 === '坊'
+              ? h(星坊页, {
+                  会话: 现在会话,
+                  图,
+                  会话们,
+                  刷新: () => {
+                    拉会话()
+                    拉图(当前)
+                  },
+                })
+              : null,
+            选中星 ? h(详情卡, { 星: 选中星, 关: () => 设选中(null) }) : null,
+          ),
+          // 右侧会话栏
+          h('div', { style: 会话栏 },
+            h('div', { style: { fontSize: 11, opacity: 0.4, padding: '12px 12px 6px' } }, '会话'),
+            会话们.length === 0
+              ? h('div', { style: { fontSize: 11.5, opacity: 0.35, padding: '4px 12px', lineHeight: 1.7 } },
+                  '还没有档案。在 ~/.dsh/startide/会话/<会话id>/ 里放 .md 就有星了。')
+              : 会话们.map((s) =>
+                  h('div', {
+                    key: s.id,
+                    onClick: () => {
+                      设当前(s.id)
+                      设页('图')
+                    },
+                    style: {
+                      padding: '8px 12px',
+                      margin: '2px 8px',
+                      borderRadius: 8,
+                      cursor: 'pointer',
+                      background: 当前 === s.id ? 'rgba(140,170,230,0.16)' : 'transparent',
+                    },
+                  },
+                    h('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
+                      h('i', { style: {
+                        width: 6, height: 6, borderRadius: 99, flex: 'none',
+                        background: s.有 ? '#9ed0ff' : 'rgba(150,170,210,0.35)',
+                      } }),
+                      h('span', { style: { fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.名)),
+                    h('div', { style: { fontSize: 10.5, opacity: 0.34, marginLeft: 13 } },
+                      s.有 ? 说重(s.字) : '还没建档'),
+                  ),
+                )),
+        ),
+      )
+    }
+
+    function 详情卡({ 星, 关 }) {
+      // ⚠ 点某颗星直接崩掉整页的教训：详情卡里任何一个字段是 undefined 都会把渲染炸掉，
+      //   炸了以后整个星汐都打不开。这里整块兜住，出错就显示一句，不让它带崩插件。
+      try {
+        return 详情卡内容({ 星, 关 })
+      } catch (e) {
+        return h('div', { style: 详情 },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h('span', { style: { fontSize: 13, fontWeight: 600, flex: 1 } }, '这颗星打不开'),
+            h('button', { style: { ...小按钮, padding: '1px 8px' }, onClick: 关 }, '×')),
+          h('div', { style: { fontSize: 11, opacity: 0.5, marginTop: 6, lineHeight: 1.7 } },
+            String((e && e.message) || e)))
+      }
+    }
+
+    function 详情卡内容({ 星, 关 }) {
+      const 名 = String((星 && (星.title || 星.name || 星.ref)) || '（没有名字）')
+      const 色 = 星色(星) || '#b9c6e8'
+      return h('div', { style: 详情 },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
+          h('i', { style: { width: 8, height: 8, borderRadius: 99, background: 星色(星), flex: 'none' } }),
+          h('span', { style: { fontSize: 13, fontWeight: 600, flex: 1 } }, 星.title),
+          h('button', { style: { ...小按钮, padding: '1px 8px' }, onClick: 关 }, '×')),
+        h('div', { style: { fontSize: 11, opacity: 0.45, marginBottom: 8 } },
+          星.kind === 'card'
+            ? (星.chapter ? '档案 · ' + (章名表[星.chapter] || '') : '档案' + (星.chapterName ? ' · ' + 星.chapterName : ''))
+            : '日记 · ' + 星.date),
+        星.小标题们 && 星.小标题们.length
+          ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 8 } },
+              星.小标题们.map((t, i) => h('span', { key: i, style: 小标签 }, t)))
+          : null,
+        h('div', { style: { flex: 1, overflowY: 'auto', fontSize: 12.5, lineHeight: 1.85, opacity: 0.88, paddingRight: 4 } },
+          正文段落(星.text).map((p, i) => h('p', { key: i, style: { margin: '0 0 10px' } }, p))),
+      )
+    }
+
+    function 正文段落(文) {
+      if (!文) return ['（这条只有标题，正文还没写）']
+      const 净 = String(文)
+        .replace(/^>\s?/gm, '')
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^[-*]\s+/gm, '· ')
+        .replace(/^#{1,6}\s*/gm, '')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      // 单行超长就按句号断一下，不然详情里是一大坨没有换行的字
+      return 净
+        .split(/\n{2,}/)
+        .flatMap((段) => {
+          const t = 段.trim()
+          if (t.length <= 120) return [t]
+          const 句们 = t.match(/[^。！？；]+[。！？；]?/g) || [t]
+          const 出 = []
+          let 缓 = ''
+          for (const 句 of 句们) {
+            if ((缓 + 句).length > 90) {
+              if (缓) 出.push(缓.trim())
+              缓 = 句
+            } else 缓 += 句
+          }
+          if (缓.trim()) 出.push(缓.trim())
+          return 出
+        })
+        .filter(Boolean)
+    }
+
+    // ── 样式 ──
+    const 外层 = {
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+      background: 'radial-gradient(120% 90% at 45% 46%, #0b1224 0%, #070b16 48%, #04060c 100%)',
+      color: '#e6edff', fontFamily: '"PingFang SC","Microsoft YaHei",system-ui,sans-serif',
+    }
+    const 顶栏 = {
+      display: 'flex', alignItems: 'center', gap: 4, height: 46, padding: '0 14px',
+      borderBottom: '1px solid rgba(140,170,230,0.12)', flex: 'none',
+    }
+    const 页签 = {
+      border: 'none', borderRadius: 7, padding: '5px 12px', fontSize: 12.5,
+      cursor: 'pointer', fontFamily: 'inherit', transition: 'all .12s',
+    }
+    const 会话栏 = {
+      width: 208, flex: 'none', borderLeft: '1px solid rgba(140,170,230,0.12)',
+      overflowY: 'auto', background: 'rgba(6,10,20,0.4)',
+    }
+    const 居中 = {
+      position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+      justifyContent: 'center', textAlign: 'center', padding: 24,
+    }
+    const 小按钮 = {
+      background: 'rgba(140,170,230,0.12)', color: '#dbe6ff',
+      border: '1px solid rgba(140,170,230,0.2)', borderRadius: 6, fontSize: 12,
+      cursor: 'pointer', fontFamily: 'inherit',
+    }
+    const 主按钮 = {
+      background: 'rgba(124,196,255,0.16)', color: '#cfe8ff',
+      border: '1px solid rgba(124,196,255,0.38)', borderRadius: 8,
+      padding: '8px 22px', fontSize: 12.5, fontFamily: 'inherit',
+      cursor: 'pointer', letterSpacing: 0.5,
+    }
+    const 卡片 = {
+      background: 'rgba(255,255,255,0.026)',
+      border: '1px solid rgba(140,170,230,0.1)',
+      borderRadius: 12, padding: '15px 17px', marginBottom: 14,
+    }
+    const 行式 = {
+      display: 'flex', alignItems: 'center', gap: 12, minHeight: 36,
+      borderTop: '1px solid rgba(140,170,230,0.065)',
+    }
+    const 标式 = { width: 68, flex: 'none', fontSize: 11.5, opacity: 0.45, letterSpacing: 0.3 }
+    const 值式 = { flex: 1, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+    const 注式 = { fontSize: 10.5, opacity: 0.3, flex: 'none' }
+    const 小标签 = {
+      fontSize: 10.5, padding: '2px 7px', borderRadius: 6,
+      background: 'rgba(140,170,230,0.13)', color: 'rgba(226,236,255,0.72)',
+    }
+    const 详情 = {
+      position: 'absolute', top: 10, right: 10, bottom: 10, width: 'min(340px, 42%)',
+      display: 'flex', flexDirection: 'column', background: 'rgba(9,14,26,0.92)',
+      border: '1px solid rgba(140,170,230,0.16)', borderRadius: 12, padding: '12px 14px',
+      backdropFilter: 'blur(10px)', boxShadow: '0 18px 50px rgba(0,0,0,0.5)',
+    }
+
+    return {
+      inject: ['slots', 'remote.directoryPicker'],
+      apply(ctx) {
+        客户端 = ctx
+        ctx.slots.inject('sidebar.panellist', () =>
+          ctx.slots.register(
+            { name: 'sidebar.panellist', id: 'startide', order: 20, label: () => '星汐' },
+            图标,
+          ),
+        )
+        // 兜错：渲染炸了也别白屏，把错误显示出来（能直接看出是哪一行）
+        class 兜错 extends React.Component {
+          constructor(p) {
+            super(p)
+            this.state = { 错: null }
+          }
+          static getDerivedStateFromError(e) {
+            return { 错: e }
+          }
+          componentDidCatch(e, info) {
+            try {
+              console.error('[星汐]', e, info)
+            } catch {}
+          }
+          render() {
+            if (this.state.错) {
+              const e = this.state.错
+              return h(
+                'div',
+                { style: { padding: 20, color: '#ff9a9a', fontSize: 12.5, lineHeight: 1.7, whiteSpace: 'pre-wrap' } },
+                '星汐渲染出错：',
+                String((e && e.message) || e),
+                String.fromCharCode(10, 10),
+                String((e && e.stack) || '').slice(0, 900),
+              )
+            }
+            return this.props.children
+          }
+        }
+        const 星汐兜 = (props) => h(兜错, null, h(星汐, props))
+        ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: 'startide' }, 星汐兜))
+      },
+    }
+  },
+})
