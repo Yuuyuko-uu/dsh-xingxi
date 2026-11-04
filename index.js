@@ -618,7 +618,7 @@ export function 那天成文(日, 列) {
 //                          ② 新建一个会话，把提示词丢进去
 //     · 真正读料、提炼、写档案的，是**那个新会话**（一个普通 agent，会读写文件）
 //     · **不是子代理**（子代理只回一段文本，写不干净），也**不能叫醒用户当前会话**
-//       —— 这插件是给别人用的，别人那边没有「小贝壳」这个常驻助手
+//       —— 这插件是给别人用的，别人的会话里没有这个常驻助手
 // ═══════════════════════════════════════════════════════
 
 export const 分支表 = [
@@ -1610,7 +1610,7 @@ function 文件签名们(目录) {
   return 串
 }
 
-/** 共享词桥：两颗星提到同一个少见的词（比如「平潭」「小娇妻」）就牵一根线。
+/** 共享词桥：两颗星提到同一个少见的词（比如某个地名）就牵一根线。
  *  只连「不太常见」的词 —— 到处都是的词（她、我、我们）连不出意义，反而糊一片。 */
 export function 造共享桥(星们, 上限 = 400) {
   const 词表 = new Map()   // 词 -> [星索引]
@@ -2488,6 +2488,39 @@ export function apply(ctx, 配置 = {}) {
       return { ok: false, 原因: '建不了文件夹：' + String((e && e.message) || e) }
     }
 
+    // ⭐ 刹车（2026-11-04）：以前每 60 秒一轮、每个没跑完的文件夹各派一个，
+    //   进度一卡住就会一直开新会话（实测一分钟冒出八个，卸载都停不住，得重启）。
+    //   三道闸：刚派过的不重复派 / 连续三次没进展就停 / 停下要人点「继续」才再派。
+    const 任路 = join(文件夹, '.拾星', '任务.json')
+    let 旧任 = {}
+    try {
+      旧任 = JSON.parse(readFileSync(任路, 'utf8')) || {}
+    } catch {}
+    if (旧任.暂停) {
+      return { ok: false, 原因: '已经停了（连续 ' + (旧任.连续失败 || 0) + ' 次没进展），点「继续」才再派' }
+    }
+    if (Number(旧任.连续失败 || 0) >= 3) {
+      try {
+        writeFileSync(任路, JSON.stringify({ ...旧任, 暂停: true, 暂停原因: '连续三次没进展' }, null, 2), 'utf8')
+      } catch {}
+      记一笔('拾星：' + 文件夹 + ' 连续三次没进展，自动停下（不再派）')
+      return { ok: false, 原因: '连续三次没进展，已自动停下' }
+    }
+    if (旧任.上次派遣 && Date.now() - Number(旧任.上次派遣) < 10 * 60 * 1000) {
+      return { ok: false, 原因: '刚派过（10 分钟内不重复派）' }
+    }
+    // ⭐ 进程内也只放一个：插件重载留下的旧调度器还醒着时，谁先到谁派，别人让开
+    const 锁键 = Symbol.for('dsh-xingxi.派遣锁')
+    if (Date.now() - Number(globalThis[锁键] || 0) < 30 * 1000) {
+      return { ok: false, 原因: '刚派过（同一个进程 30 秒内只派一个）' }
+    }
+    // ⭐ 先占坑再开会话：「上次派遣」写在新建会话之前 ——
+    //   别的调度器（或者重启后这一份）马上就能看到，不会再派第二次
+    try {
+      writeFileSync(任路, JSON.stringify({ ...旧任, 上次派遣: Date.now() }, null, 2), 'utf8')
+    } catch {}
+    globalThis[锁键] = Date.now()
+
     // ⚠ 读的必须是**绑定的那个源会话**。以前用 项.id（文件夹条目自己的 id），
     //   结果切出来的是「拾星刚开的那个空会话」，一天料都切不到（实测）。
     const 源 = 找源会话(文件夹) || sid
@@ -2601,8 +2634,28 @@ export function apply(ctx, 配置 = {}) {
     } catch {}
 
     在跑.set(文件夹, Date.now())
-    const 收 = () => {
+    // ⭐ 收工记账：成了就清失败次数，没成加一次；连续三次没进展就停下，
+    //   不然调度器会一分钟派一个新会话，永远停不下来。
+    const 收 = (成 = false) => {
       在跑.delete(文件夹)
+      try {
+        const 旧 = JSON.parse(readFileSync(任路, 'utf8')) || {}
+        if (成) {
+          旧.连续失败 = 0
+          旧.暂停 = false
+          delete 旧.暂停原因
+        } else {
+          旧.连续失败 = Number(旧.连续失败 || 0) + 1
+          if (旧.连续失败 >= 3) {
+            旧.暂停 = true
+            旧.暂停原因 = '连续三次没进展'
+            记一笔('拾星：' + 文件夹 + ' 连续三次没进展，自动停下（不再派）')
+          }
+        }
+        writeFileSync(任路, JSON.stringify(旧, null, 2), 'utf8')
+      } catch (e) {
+        记一笔('收工记账失败：' + String((e && e.message) || e))
+      }
       // ⚠ **不 dispose、不删**：会话留着，她能从侧栏点进去看它干了什么。
       //   （以前跑完就删/关，结果「会话自动消失」「重启又回来」两种毛病都来了）
     }
@@ -2673,6 +2726,11 @@ export function apply(ctx, 配置 = {}) {
             //   实测：650 条里有 619 条全挤进「八」，就是因为块里没有章标题。
             const 好的 = []
             for (const f of 块们.文件) {
+              // ⭐ 空块不写：模板抄回来、正文一片空，写进去等于什么都没整理
+              if (!String(f.文 || '').trim()) {
+                记一笔('空块，拒收（' + f.名 + '）')
+                continue
+              }
               if (/(^|\/)记忆卡\.md$/.test(f.名) && !/^##\s*[一二三四五六七八]/m.test(f.文)) {
                 记一笔('记忆卡块没有章标题，拒收（会全塞进最后一章）')
                 continue
@@ -2708,7 +2766,7 @@ export function apply(ctx, 配置 = {}) {
       }
       if (到齐) {
         记一笔('这一批收工：进度 ' + 现进度 + '（已到目标）')
-        收()
+        收(true)
         return
       }
       // 静了 3 分钟（36 次 × 5 秒）
@@ -2728,8 +2786,8 @@ export function apply(ctx, 配置 = {}) {
           setTimeout(轮, 5000)
           return
         }
-        记一笔('催两次都没动，这批放手（会话留着，调度器 10 分钟后会再派）：进度 ' + (现进度 || '开头'))
-        在跑.delete(文件夹)
+        记一笔('催两次都没动，这批放手（会话留着，10 分钟后调度器才会再派）：进度 ' + (现进度 || '开头'))
+        收(false)
         return
       }
       setTimeout(轮, 5000)
@@ -2770,7 +2828,7 @@ export function apply(ctx, 配置 = {}) {
         })
       }
     } catch (e) {
-      收()
+      收(false)
       return { ok: false, 原因: '把提示词交过去失败：' + String((e && e.message) || e) }
     }
     // 登记这个工作会话，跑完要删干净（不然重启又冒出来一个「未命名」）
@@ -2798,19 +2856,16 @@ export function apply(ctx, 配置 = {}) {
 
     // 记下这次任务（源会话 + 目标 + 进度），调度器靠它判断还没干完
     try {
-      const 任 = join(文件夹, '.拾星', '任务.json')
-      let 旧任 = {}
-      try {
-        旧任 = JSON.parse(readFileSync(任, 'utf8')) || {}
-      } catch {}
       writeFileSync(
-        任,
+        任路,
         JSON.stringify(
           {
             ...旧任,
             会话: 源,
             工作会话: 新id,
             开始: Date.now(),
+            // ⭐ 刹车用的时间戳：10 分钟内不再给这个文件夹派第二批
+            上次派遣: Date.now(),
             最早: 料.最早,
             // ⚠ 目标要写**整段历史的最后一天**（全部最晚），不是这一批的最晚。
             //   写错了会以为「已经整理完」，调度器就停了（实测刚踩过）。
@@ -2854,6 +2909,9 @@ export function apply(ctx, 配置 = {}) {
           continue
         }
         if (!任务 || !任务.最晚) continue
+        // ⭐ 停下的不再自动派；刚派过的等够 10 分钟（跟「派一批」里那三道闸一致）
+        if (任务.暂停) continue
+        if (任务.上次派遣 && Date.now() - Number(任务.上次派遣) < 10 * 60 * 1000) continue
         const 进度 = 算进度(夹)
         if (进度 && 进度 >= String(任务.最晚)) {
           if (!任务.完成) {
@@ -2864,7 +2922,9 @@ export function apply(ctx, 配置 = {}) {
           continue
         }
         记一笔('调度：' + 夹 + ' 还没完（到 ' + (进度 || '开头') + '），自动派一批')
-        await 派一批(项)
+        const 出 = await 派一批(项)
+        // ⭐ 一轮最多派一个：真派出去才收工，被闸挡下/没料的就接着看下一个
+        if (出 && 出.ok) break
       }
     } catch (e) {
       记一笔('调度出错：' + String((e && e.message) || e))
@@ -2872,13 +2932,29 @@ export function apply(ctx, 配置 = {}) {
   }
 
   try {
+    // ⭐ 只留一个调度器（2026-11-04 实测：一天里插件重载了 63 次，等于挂了 63 个定时器，
+    //   每个还有自己的「在跑」，于是一分钟内 8 个调度器一起醒过来各派一个）。
+    //   globalThis 在同一个进程里不会被重载清掉，拿它存「上一次那个的停止函数」。
+    const 停键 = Symbol.for('dsh-xingxi.调度停')
+    const 旧停 = globalThis[停键]
+    if (typeof 旧停 === 'function') {
+      try { 旧停() } catch {}
+      记一笔('旧的拾星调度器已停（重载时清掉，不留第二个）')
+    }
     const 定时服务 = typeof ctx.get === 'function' ? ctx.get('timer') : undefined
+    let 停 = null
     if (定时服务 && typeof 定时服务.repeat === 'function') {
-      ctx.effect(() => 定时服务.repeat(调度, 60 * 1000))
+      const r = 定时服务.repeat(调度, 60 * 1000)
+      停 = typeof r === 'function' ? r : null
     } else {
       const t = setInterval(调度, 60 * 1000)
-      ctx.effect(() => () => clearInterval(t))
+      停 = () => clearInterval(t)
     }
+    globalThis[停键] = 停
+    ctx.effect(() => () => {
+      try { if (typeof 停 === 'function') 停() } catch {}
+      if (globalThis[停键] === 停) globalThis[停键] = null
+    })
     记一笔('拾星调度器已挂（每 60 秒看一遍）')
   } catch (e) {
     记一笔('调度器挂不上：' + String((e && e.message) || e))
@@ -2956,6 +3032,21 @@ export function apply(ctx, 配置 = {}) {
             } catch {}
             const 这项 = 列会话(活会话们()).find((x) => x.id === sid)
             if (!这项) return 回JSON(res, { ok: false, 原因: '找不到这个会话' }, 400)
+            // ⭐ 手动点「拾星」= 人明确说继续：把自动停下时留的暂停与 10 分钟节流清掉
+            //   （自动调度守那两道闸，人点了就听人的；进程内那道锁也一起放开）
+            try {
+              globalThis[Symbol.for('dsh-xingxi.派遣锁')] = 0
+              const 任路2 = join(这项.目录, '.拾星', '任务.json')
+              const 旧 = JSON.parse(readFileSync(任路2, 'utf8')) || {}
+              if (旧.暂停 || 旧.上次派遣) {
+                delete 旧.暂停
+                delete 旧.暂停原因
+                旧.连续失败 = 0
+                旧.上次派遣 = 0
+                writeFileSync(任路2, JSON.stringify(旧, null, 2), 'utf8')
+                记一笔('手动拾星：' + 这项.目录 + ' 继续（暂停与节流已清）')
+              }
+            } catch {}
             const 出 = await 派一批(这项)
             return 回JSON(res, 出.ok ? 出 : { ok: false, 原因: 出.原因 }, 出.ok ? 200 : 400)
           }
