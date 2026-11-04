@@ -571,6 +571,23 @@ function 取文字(内容) {
 const 料缓存 = new Map()
 
 /** 会话日志 → [{时, 日, 角色, 文}]（只要双方真说过的话） */
+/**
+ * ⭐ 0.2.3：判断一条 user/message 是不是**真人说的**。
+ *
+ * 以前只放行 `source.kind === 'user'` —— 于是 QQ 桥接送进来的（kind='qq'）
+ * 被当成「注入的上下文」一起扔了，拾星切出来的料里只有 ASSISTANT，
+ * 整理出来的日记就成了独白。别的桥接（微信 / TG）同理。
+ *
+ * 现在反过来：**只有明确是注入的才丢**，剩下的都当真人说的。
+ */
+export function 是真人说的(来源) {
+  const k = String(来源 || '')
+  if (!k) return true
+  if (k.startsWith('plugin:')) return false      // 插件自己递的话
+  const 注入 = new Set(['time-context', 'runtime-context', 'skill-catalog', 'compact-checkpoint', 'speak-up'])
+  return !注入.has(k)
+}
+
 export function 读会话(会话id) {
   const 路径 = 找会话日志(会话id)
   if (!路径) return { 事件: [], 缺: ['找不到这个会话的日志'] }
@@ -604,7 +621,7 @@ export function 读会话(会话id) {
       }
       if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
       const 来源 = (e.data && e.data.source && e.data.source.kind) || ''
-      if (e.type === 'user/message' && 来源 !== 'user') continue
+      if (e.type === 'user/message' && !是真人说的(来源)) continue
       const 内容 =
         e.type === 'assistant/message'
           ? e.data && e.data.message && e.data.message.content
@@ -1239,9 +1256,26 @@ function 写一章(文件夹, 文件名, 章号, 文, 指纹, 报告) {
     const m名 = /^##\s*[一二三四五六七八]\s*[、.．｜|·:：\-—]\s*(.+)$/m.exec(String(文 || ''))
     if (m名 && m名[1].trim() && !/（未命名）/.test(m名[1])) 名 = m名[1].trim()
     if (!名) 名 = 标准名[号 - 1]
+    // ⭐ 0.2.3：按章号插到该在的位置（不然新章会被甩到文件末尾，变成「一、三、四、…、二」）
+    const 汉字表 = '一二三四五六七八'
+    let 插行 = -1
+    for (let i = 0; i < 行们.length; i++) {
+      const m2 = /^##\s*([一二三四五六七八])\s*[、.．｜|·:：\-—]/.exec(String(行们[i]))
+      if (!m2) continue
+      const 该号 = 汉字表.indexOf(m2[1]) + 1
+      if (该号 > 号) {
+        插行 = i
+        break
+      }
+    }
+    if (插行 >= 0) {
+      const 拼 = [...行们.slice(0, 插行), 章头 + 名, ...留, '', ...行们.slice(插行)]
+      writeFileSync(路径, 拼.join(换行), 'utf8')
+      return [文件名 + ' # ' + 号]
+    }
     const 头 = 旧 && !旧.endsWith(换行) ? 换行 : ''
     writeFileSync(路径, 旧 + 头 + 换行 + 章头 + 名 + 换行 + 留.join(换行) + 换行, 'utf8')
-    return [文件名 + " # " + 号]
+    return [文件名 + ' # ' + 号]
   }
   // 找这一章的结尾（下一个 ## 或文件末）
   let 止 = 行们.length
@@ -1340,8 +1374,15 @@ export function 写回(文件夹, 块们) {
     // ⭐ 块名带章号（`记忆卡.md#三`）：直接插进那一章
     const 章m = /^(.+?\.md)#([一二三四五六七八1-8])$/.exec(String(f.名 || ""))
     if (章m) {
-      if (f.整章) 报告.写入.push(...写一章整章(文件夹, 章m[1], 章m[2], f.文, 报告))
-      else 报告.写入.push(...写一章(文件夹, 章m[1], 章m[2], f.文, 指纹, 报告))
+      if (f.整章) {
+        const 整 = 写一章整章(文件夹, 章m[1], 章m[2], f.文, 报告)
+        if (整.length) 报告.写入.push(...整)
+        else if (String(f.文 || '').trim()) {
+          // ⚠ 整章替换在「这一章还不存在」时会返回空 —— 以前这里没有回退，
+          //   于是第一次建卡时第二章被静默丢掉，而且之后每一批都撞同一堵墙。
+          报告.写入.push(...写一章(文件夹, 章m[1], 章m[2], f.文, 指纹, 报告))
+        }
+      } else 报告.写入.push(...写一章(文件夹, 章m[1], 章m[2], f.文, 指纹, 报告))
       continue
     }
     const 路径 = join(文件夹, f.名)
@@ -1574,7 +1615,7 @@ function 读会话头(路径) {
           // 拾星自己派出去的会话：它的第一条「用户消息」是插件塞的提示词
           if (来源.startsWith('plugin:')) 值.机器 = true
           if (来源 === 'runtime-context' && !值.标题) 值.机器 = true   // 一上来就是注入的上下文 → 机器开的
-          if (来源 !== 'user') continue
+          if (!是真人说的(来源)) continue
           const c = e.data && e.data.content
           const t = (Array.isArray(c) ? c : []).filter((x) => x && x.type === 'text').map((x) => x.text).join(' ').trim()
           if (t) 值.标题 = t.split(String.fromCharCode(10)).join(' ').slice(0, 40)
