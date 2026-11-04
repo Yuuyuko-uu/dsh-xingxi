@@ -1472,7 +1472,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: { position: 'absolute', inset: 0, overflowY: 'auto', padding: '28px 30px 36px', background: 'radial-gradient(80% 60% at 15% 0%, rgba(54,81,132,0.1), transparent 72%)' } },
         h('div', { style: { maxWidth: 680 } },
           卡('现在这个会话', '星图、星册、星历画的就是它', [
-            行('会话', 会话 && 会话.名, 会话 && 会话.有 ? (会话.字 / 10000).toFixed(1) + ' 万字' : '还没建档'),
+            行('会话', 会话 && 会话.名, 会话 && 会话.有 ? (会话.字 / 10000).toFixed(1) + ' 万字' : '未绑定文件夹'),
             h('div', { style: { ...行式, alignItems: 'center' } },
               h('span', { style: 标式 }, '文件夹'),
               !会话
@@ -1527,7 +1527,7 @@ window.__ModuleLoader__.load({
 
     function 说重(字) {
       const n = Number(字) || 0
-      if (!n) return '还没建档'
+      if (!n) return '未绑定文件夹'
       if (n >= 10000) return (n / 10000).toFixed(1) + ' 万字'
       return n + ' 字'
     }
@@ -1799,7 +1799,7 @@ window.__ModuleLoader__.load({
                       h('span', { 'aria-hidden': true, style: { flex: 'none', fontSize: 12, letterSpacing: -2, opacity: 拖会话 === s.id ? 0.78 : 0.23, color: 'rgba(198,216,247,0.8)', cursor: 'grab', transition: 'opacity .15s ease' } }, '⠿')),
 
                     h('div', { style: { fontSize: 10.5, opacity: 0.34, marginLeft: 13 } },
-                      s.有 ? 说重(s.字) : '还没建档'),
+                      s.有 ? 说重(s.字) : '未绑定文件夹'),
                   ),
                 )),
         ),

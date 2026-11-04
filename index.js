@@ -2131,11 +2131,32 @@ export function apply(ctx, 配置 = {}) {
     if (!exec) return ''
     // DSH 的工具上下文是 agent: { id }（ToolRunContext），**没有 sessionId 这个字段**
     // （老代码读 exec.sessionId → 永远是空 → 绑定全查不到，这就是用户报的那个 bug）
-    const 候选 = [exec.agent && exec.agent.id, exec.agentId, exec.sessionId, exec.session && exec.session.id, exec.id]
-    for (const c of 候选) {
-      const t = String(c || '').trim()
-      if (t) return t
+    // ⭐ 0.1.9：不同版本 / 不同宿主给的东西不一样，能想到的都试一遍。
+    const 取 = (o, k) => {
+      try {
+        const v = o && o[k]
+        return v == null ? '' : String(v).trim()
+      } catch (e) {
+        return ''
+      }
     }
+    const 候选 = [
+      取(exec.agent, 'id'),
+      取(exec.agent && exec.agent.session, 'id'),
+      取(exec.agent, 'sessionId'),
+      取(exec, 'agentId'),
+      取(exec, 'sessionId'),
+      取(exec.session, 'id'),
+      取(exec.runContext && exec.runContext.agent, 'id'),
+      取(exec.context && exec.context.agent, 'id'),
+      取(exec, 'id'),
+    ]
+    for (const c of 候选) if (c) return c
+    // 还是空的：把看到的键记下来（下次报告能直接说清是哪儿来的空）
+    try {
+      记一笔('取会话id 失败：exec 的键 = ' + Object.keys(exec || {}).join(',') +
+        ' ｜agent 的键 = ' + Object.keys((exec && exec.agent) || {}).join(','))
+    } catch (e) {}
     return ''
   }
 
@@ -2365,6 +2386,8 @@ export function apply(ctx, 配置 = {}) {
         },
         async execute(_a, exec) {
           const sid = 取会话id(exec)
+          // ⚠ 拿不到当前会话 id 时**不许去读本机那两份** —— 那可能是另一个人的档案
+          if (!sid) return { ok: false, text: '拿不到当前会话的 id，所以不知道该读哪一份档案。请先重载一次星汐；还这样的话，把这条原话告诉作者。' }
           const 档 = 本会话的档案(sid)
           const 有卡 = 档.卡路 && existsSync(档.卡路)
           if (!有卡) {
@@ -2414,6 +2437,7 @@ export function apply(ctx, 配置 = {}) {
         async execute(args, exec) {
           try {
             const sid = 取会话id(exec)
+            if (!sid) return { ok: false, text: '拿不到当前会话的 id，所以不知道该读哪一份档案。请先重载一次星汐；还这样的话，把这条原话告诉作者。' }
             const 档 = 所有档案(sid)
             const 限 = Math.max(600, Math.min(20000, Number((args && args.最多字) || 4000)))
             const 词 = String((args && args.关键词) || '').trim()
