@@ -913,19 +913,63 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
   ].join('\n')
 }
 
-/** 这个档案整理到哪天了：看 日记/ 里最大的文件名（比模型自报的账本可靠） */
+/** ⭐ 0.2.0：通读时先看一眼章号重没重 —— 重了星图会重影、检索会重复，得让人知道 */
+export function 查重章(文) {
+  const 计 = new Map()
+  for (const 行 of String(文 || '').split(new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10)))) {
+    const m = /^##\s*([一二三四五六七八])\s*[、.．｜|·:：\-—]/.exec(行)
+    if (!m) continue
+    计.set(m[1], (计.get(m[1]) || 0) + 1)
+  }
+  const 重 = [...计.entries()].filter((x) => x[1] > 1)
+  if (!重.length) return ''
+  return (
+    '⚠ 这本记忆卡里有一章的编号重复了：' +
+    重.map((x) => '第' + x[0] + '章 ×' + x[1]).join('、') +
+    ' —— 星图上同一章会重影、检索也会重复，建议合并成一套。' +
+    String.fromCharCode(10) + String.fromCharCode(10)
+  )
+}
+
+/**
+ * ⭐ 0.2.0：进度改成「**连着整理到哪天**」，不再取日记里最大的日期。
+ *
+ * 为什么：以前取 max —— 哪天写错一个日期（比如工人写了今天的日记），进度就永久跳到今天，
+ * 中间那十几天就再也补不回来了（用户实测踩过，18 天全被判成「已整理」）。
+ *
+ * 现在：料里有哪几天（有对话的那些天），就从最早那天往后数——
+ * **每一天都有日记才算过**，中间断在哪儿，进度就停在哪儿。
+ * 没有料（还没切过）就退回老办法：日记最大 + 账本取大的。
+ */
 export function 算进度(文件夹) {
-  let 最大 = ''
+  // ① 料里有哪些天
+  const 料天 = []
   try {
-    const 日夹 = join(文件夹, '日记')
-    if (existsSync(日夹)) {
-      for (const f of readdirSync(日夹)) {
-        const m = /(\d{4}-\d{2}-\d{2})/.exec(f)
-        if (m && m[1] > 最大) 最大 = m[1]
-      }
+    for (const f of readdirSync(join(文件夹, '.拾星', '料'))) {
+      const m = /^(\d{4}-\d{2}-\d{2})\.txt$/i.exec(f)
+      if (m) 料天.push(m[1])
     }
   } catch {}
-  // 再看一眼账本，两个取更大的
+  料天.sort()
+  // ② 日记里有那些天
+  const 有日记 = new Set()
+  try {
+    for (const f of readdirSync(join(文件夹, '日记'))) {
+      const m = /(\d{4}-\d{2}-\d{2})/.exec(f)
+      if (m) 有日记.add(m[1])
+    }
+  } catch {}
+  if (料天.length) {
+    let 进度 = ''
+    for (const d of 料天) {
+      if (!有日记.has(d)) break
+      进度 = d
+    }
+    return 进度
+  }
+  // ③ 没有料：老办法
+  let 最大 = ''
+  for (const d of 有日记) if (d > 最大) 最大 = d
   try {
     const 账 = JSON.parse(readFileSync(join(文件夹, '.xingxi.json'), 'utf8'))
     const v = String((账 && 账.已整理到) || '')
@@ -2399,7 +2443,8 @@ export function apply(ctx, 配置 = {}) {
                 : '这个会话还没指定文件夹（星坊 → 现在这个会话 → 选…）',
             }
           }
-          return { ok: true, text: readFileSync(档.卡路, 'utf8') }
+          const 全文 = readFileSync(档.卡路, 'utf8')
+          return { ok: true, text: 查重章(全文) + 全文 }
         },
       })
       记一笔('工具 xingxi 挂上了（通读记忆卡）')
@@ -2645,13 +2690,52 @@ export function apply(ctx, 配置 = {}) {
   }
 
   /** 这个文件夹绑定的是哪个源会话（拾星自己开的工作会话不能当源） */
+  const 源缓存 = new Map()
   const 找源会话 = (夹) => {
+    // ⭐ 0.2.0：以前是「绑定表里第一个 session- 开头的」—— 绑定表里混着**拾星自己派出去的工人**，
+    //   谁的目录对不上就能被选中，于是拿一个只有几条消息的空工人去切料（只切出一天）。
+    //   还有一类真源是**裸 uuid**（插件建的会话），被 session- 前缀那条直接过滤掉了。
+    //   现在的判据：先剔掉工人，再在剩下的里面挑**事件最多**的那个。
     try {
       const 绑 = 读存配置().绑定 || {}
-      for (const [k, v] of Object.entries(绑)) {
-        if (v === 夹 && String(k).startsWith('session-')) return String(k)
+      const 工人们 = new Set()
+      const 收工人 = (路) => {
+        try {
+          for (const id of JSON.parse(readFileSync(路, 'utf8')) || []) if (id) 工人们.add(String(id))
+        } catch (e) {}
       }
-    } catch {}
+      收工人(join(档案根, '工人.json'))
+      收工人(join(夹, '.拾星', '工人.json'))
+      const 是工人 = (k) => 工人们.has(k) || 工人们.has('session-' + k) || 工人们.has(String(k).replace(/^session-/, ''))
+      // 同一个文件夹 60 秒内算过就不再算（按天切要把整份日志读一遍，候选多的时候慢）
+      const 缓 = 源缓存.get(夹)
+      if (缓 && Date.now() - 缓.时 < 60000 && 缓.源) return 缓.源
+      let 最好 = ''
+      let 最好量 = -1
+      for (const [k, v] of Object.entries(绑)) {
+        if (String(v) !== String(夹)) continue
+        const 键 = String(k || '')
+        if (!键 || 是工人(键)) continue
+        let 量 = 0
+        try {
+          量 = 按天切(键, '').全部事件
+        } catch (e) {
+          量 = 0
+        }
+        if (量 > 最好量) {
+          最好量 = 量
+          最好 = 键
+        }
+      }
+      if (最好) {
+        源缓存.set(夹, { 时: Date.now(), 源: 最好 })
+        记一笔('找源会话：' + 夹 + ' → ' + 最好 + '（' + 最好量 + ' 条事件）')
+        return 最好
+      }
+      记一笔('找源会话：' + 夹 + ' 没找到合适的源（绑定里有 ' + Object.keys(绑).length + ' 条，工人 ' + 工人们.size + ' 个）')
+    } catch (e) {
+      记一笔('找源会话出错：' + String((e && e.message) || e))
+    }
     return ''
   }
 
