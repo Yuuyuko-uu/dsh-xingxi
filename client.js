@@ -1356,14 +1356,15 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const 代 = ++日记设置代.current
         let 活着 = true
-        fetch('/dsh-xingxi/diary', { cache: 'no-store' })
+        // ⭐ 0.2.1：写日记是**每个会话各管各的**，所以要带上这个会话的 id 去问
+        fetch('/dsh-xingxi/diary?sid=' + encodeURIComponent((会话 && 会话.id) || ''), { cache: 'no-store' })
           .then((r) => (r.ok ? r.json() : null))
           .then((j) => {
             if (!活着 || 日记设置代.current !== 代) return
-            设日(j && j.写日记 ? { ...j.写日记, 会话: 会话 && 会话.id ? 会话.id : '' } : { 开: true, 时: 23, 分: 30, 会话: 会话 && 会话.id ? 会话.id : '' })
+            设日(j && j.写日记 ? { ...j.写日记, 会话: 会话 && 会话.id ? 会话.id : '' } : { 开: false, 时: 23, 分: 30, 会话: 会话 && 会话.id ? 会话.id : '' })
           })
           .catch(() => {
-            if (活着 && 日记设置代.current === 代) 设日({ 开: true, 时: 23, 分: 30, 会话: 会话 && 会话.id ? 会话.id : '' })
+            if (活着 && 日记设置代.current === 代) 设日({ 开: false, 时: 23, 分: 30, 会话: 会话 && 会话.id ? 会话.id : '' })
           })
         return () => { 活着 = false }
       }, [会话 && 会话.id])
@@ -1378,9 +1379,6 @@ window.__ModuleLoader__.load({
           })
         } catch (e) {}
       }
-      useEffect(() => {
-        if (会话 && 会话.id && 日设 && 日设.会话 !== 会话.id) 存日({ 会话: 会话.id })
-      }, [会话 && 会话.id, 日设 && 日设.会话])
       const 时串 = 日设 ? String(日设.时).padStart(2, '0') + ':' + String(日设.分).padStart(2, '0') : ''
 
       const 日记卡 = 卡('写日记', '到点提醒当前会话写当日日记，并存进这个会话绑定的档案目录', [

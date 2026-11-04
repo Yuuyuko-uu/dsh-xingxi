@@ -913,6 +913,28 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
   ].join('\n')
 }
 
+/** DSH 把工作区路径编成目录名：分隔符 → `-`，非 ASCII 字符 → `~XXXX`（四位十六进制） */
+export function 编工作区目录(路径) {
+  const t = String(路径 || '')
+  if (!t) return ''
+  const 是分隔 = (c) => c === String.fromCharCode(92) || c === '/' || c === ':' || c === ' '
+  let 体 = ''
+  let 上个是分隔 = false
+  for (const c of t) {
+    const 码 = c.charCodeAt(0)
+    if (是分隔(c)) {
+      // ⚠ 连续的分隔符只留一个 '-':`C:\` 出来是 `C-`，不是 `C--`
+      if (!上个是分隔) 体 += '-'
+      上个是分隔 = true
+      continue
+    }
+    上个是分隔 = false
+    if (码 > 127) 体 += '~' + 码.toString(16).toUpperCase().padStart(4, '0')
+    else 体 += c
+  }
+  return '--' + 体 + '--'
+}
+
 /** ⭐ 0.2.0：通读时先看一眼章号重没重 —— 重了星图会重影、检索会重复，得让人知道 */
 export function 查重章(文) {
   const 计 = new Map()
@@ -1441,8 +1463,10 @@ const 会话目录缓存 = new Map()
 function 读会话缓存(sid) {
   const 根们 = [join(家, 'storages', 'session_projcache', 'sessions')]
   for (const 根 of 根们) {
-    const p = join(根, 裸会话id(sid) + '.json')
-    if (!existsSync(p)) continue
+    // ⚠ 缓存文件名也有两种：`<裸 uuid>.json` 和 `session-<uuid>.json`，两个都试
+    const 候选 = [join(根, 裸会话id(sid) + '.json'), join(根, String(sid) + '.json')]
+    const p = 候选.find((x) => existsSync(x))
+    if (!p) continue
     try {
       const r = JSON.parse(readFileSync(p, 'utf8'))?.record?.rows || {}
       return {
@@ -1551,15 +1575,27 @@ function 读工作区状态(目录服务) {
     if (!existsSync(p)) continue
     try {
       const j = JSON.parse(readFileSync(p, 'utf8'))
-      const 文件归档 = new Set(((j.global && j.global.archivedSessionIds) || []).map(String))
+      const 文件归档 = new Set()
+      for (const x of ((j.global && j.global.archivedSessionIds) || [])) {
+        文件归档.add(String(x))
+        文件归档.add(裸会话id(x))
+      }
       const 归档 = 实时归档 || 文件归档
       const 归属 = new Map()
+      const 路径表 = new Map()
       const 表 = (j.tables && j.tables.workspaces) || {}
       for (const k of Object.keys(表)) {
         const w = 表[k] || {}
-        for (const sid of w.sessionIds || []) 归属.set(String(sid), String(w.title || w.path || '工作区'))
+        const 标题 = String(w.title || w.path || '工作区')
+        for (const sid of w.sessionIds || []) {
+          // ⚠ 会话 id 两种写法都有（`session-x` / 裸 `x`），两个都记上，不然查不到就当未分组
+          归属.set(String(sid), 标题)
+          归属.set(裸会话id(sid), 标题)
+        }
+        const 目 = 编工作区目录(w.path)
+        if (目) 路径表.set(目, 标题)
       }
-      return { 归档, 归属, 来源: (实时归档 ? '服务+文件' : p) }
+      return { 归档, 归属, 路径表, 来源: (实时归档 ? '服务+文件' : p) }
     } catch {}
   }
   return 空
@@ -1589,7 +1625,12 @@ function 扫全部会话(目录服务) {
       头: { cwd: 头.cwd, createdAt: 头.createdAt },
       标题: 头.标题 || ('会话 ' + String(d.id).slice(8, 14)),
       // ⭐ 认不出工作区归属的就是「未分组」—— DSH 侧栏里那一栏也是这么叫的
-      工作区: 态.归属.get(d.id) || '未分组',
+      // ⭐ 0.2.1：归属有三条路 —— 工作区记录里登记过 / 它待在工作区目录里（新会话还没写进记录）/ 真没工作区
+      工作区:
+        态.归属.get(d.id) ||
+        态.归属.get(裸会话id(d.id)) ||
+        (态.路径表 && d.工作区目录 && 态.路径表.get(d.工作区目录)) ||
+        (d.工作区目录 ? '工作区' : '未分组'),
     })
   }
   出.sort((a, b) => (b.头.createdAt || 0) - (a.头.createdAt || 0))
@@ -2048,22 +2089,33 @@ export function apply(ctx, 配置 = {}) {
   //   到点 → 往绑定的会话递一句话 → 它自己写；
   //   它没写（或没有写文件的工具）→ 插件从它的回复里收「文件块」自己落盘。
   // ═══════════════════════════════════════════════════════
-  const 日记账 = { 日: '', 跑着: false, 会话: '', 到: 0 }
+  // ⭐ 0.2.1：写日记改成**按会话**管 —— 每个会话自己开、自己定时、写进自己的档案夹。
+  //   以前是一份全局设置（开/时/分/会话），开一次等于替所有会话开。
+  const 日记已跑 = new Set()      // `${会话}|${日期}`
+  const 日记在跑 = new Set()      // 正在递话的会话
 
   const 今天串 = () => {
     const d = new Date()
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
   }
 
-  const 读日记设置 = () => {
+  const 读日记设置 = (会话id) => {
     const 存 = 读存配置()
     const w = 存.写日记 || {}
+    const 各 = w.各 && typeof w.各 === 'object' ? w.各 : {}
+    const 键 = String(会话id || '')
+    let 本 = 键 ? 各[键] : null
+    // 老配置（一份全局的 {开,时,分,会话}）→ 只算给当初那个会话，别人不受影响
+    if (!本 && 键 && String(w.会话 || '') === 键 && (w.开 !== undefined || w.时 !== undefined)) {
+      本 = { 开: w.开, 时: w.时, 分: w.分 }
+    }
+    本 = 本 || {}
     return {
-      开: w.开 !== false,
-      时: Math.max(0, Math.min(23, Number(w.时 ?? 23))),
-      分: Math.max(0, Math.min(59, Number(w.分 ?? 30))),
-      // 内部仍保存当前会话 id 供定时器派话；UI 不再允许选择其他会话。
-      会话: String(w.会话 || ''),
+      // ⚠ 默认**关**：每个会话要自己打开，不能因为别人开了给自己也开上
+      开: Boolean(本.开),
+      时: Math.max(0, Math.min(23, Number(本.时 ?? w.时 ?? 23))),
+      分: Math.max(0, Math.min(59, Number(本.分 ?? w.分 ?? 30))),
+      会话: 键,
     }
   }
 
@@ -2100,23 +2152,34 @@ export function apply(ctx, 配置 = {}) {
   }
 
   const 查日记 = () => {
-    const 设 = 读日记设置()
-    if (!设.开) return
     const d = new Date()
     const 现在 = d.getHours() * 60 + d.getMinutes()
-    if (现在 < 设.时 * 60 + 设.分) return
     const 日 = 今天串()
-    if (日记账.日 === 日 || 日记账.跑着) return
-    const 会话id = 设.会话 || ''
-    if (!会话id) return
-    const 项 = 列会话(活会话们()).find((x) => x.id === 会话id)
-    const 文件夹 = 项 && 项.目录
-    if (!文件夹) return
-    日记账.跑着 = true
-    日记账.日 = 日
-    跑日记(文件夹, 会话id, 日).finally(() => {
-      日记账.跑着 = false
-    })
+    // 挨个会话看：谁自己开了、时间到了、今天还没写过
+    const 夹们 = new Map()
+    try {
+      const 绑 = 读存配置().绑定 || {}
+      for (const [k, v] of Object.entries(绑)) if (k && v) 夹们.set(String(k), String(v))
+    } catch (e) {}
+    try {
+      for (const x of 列会话(活会话们())) {
+        if (!x || !x.id || !x.目录) continue
+        if (!夹们.has(String(x.id))) 夹们.set(String(x.id), String(x.目录))
+      }
+    } catch (e) {}
+    for (const [会话id, 文件夹] of 夹们) {
+      if (!文件夹) continue
+      const 设 = 读日记设置(会话id)
+      if (!设.开) continue
+      if (现在 < 设.时 * 60 + 设.分) continue
+      const 键 = 会话id + '|' + 日
+      if (日记已跑.has(键) || 日记在跑.has(会话id)) continue
+      日记在跑.add(会话id)
+      跑日记(文件夹, 会话id, 日)
+        .then(() => 日记已跑.add(键))
+        .catch(() => {})
+        .finally(() => 日记在跑.delete(会话id))
+    }
   }
 
   // 每分钟看一次（跟刷B站那套一样，别指望整点）
@@ -3164,7 +3227,9 @@ export function apply(ctx, 配置 = {}) {
       try {
         const 绑 = 读存配置().绑定 || {}
         for (const [k, v] of Object.entries(绑)) {
-          if (!String(k).startsWith('session-') || !v) continue
+          // ⚠ 别用 `session-` 前缀当判据：真源的 id 可能就是裸 uuid（插件建的会话），
+          //   一过滤，调度器就永远看不见这个文件夹 —— 拾星也就不会再自动往下切。
+          if (!String(k) || !v) continue
           if (清单.some((x) => x.目录 === v)) continue
           const 命 = 列会话(活会话们()).find((x) => x.id === k)
           清单.push({ id: k, 目录: v, 名: (命 && 命.名) || k })
@@ -3275,7 +3340,7 @@ export function apply(ctx, 配置 = {}) {
                 }
               } catch {}
             }
-            return 回JSON(res, { 会话: 列, 根: 档案根, 写日记: 读日记设置() })
+            return 回JSON(res, { 会话: 列, 根: 档案根, 写日记: 读日记设置(地址.searchParams.get('sid') || '') })
           }
           if (径 === '/dsh-xingxi/graph') {
             const sid = 地址.searchParams.get('sid') || ''
@@ -3368,24 +3433,31 @@ export function apply(ctx, 配置 = {}) {
             }
           }
           if (径 === '/dsh-xingxi/diary') {
-            if (req.method !== 'POST') return 回JSON(res, { ok: true, 写日记: 读日记设置() })
+            if (req.method !== 'POST') {
+              const sid = String(地址.searchParams.get('sid') || '')
+              return 回JSON(res, { ok: true, 写日记: 读日记设置(sid) })
+            }
           }
           if (径 === '/dsh-xingxi/diary' && req.method === 'POST') {
             let 体 = ''
             for await (const 块 of req) 体 += 块
             try {
-              const 旧 = 读存配置().写日记 || {}
+              const 存 = 读存配置()
+              const 旧 = 存.写日记 || {}
               const 来 = JSON.parse(体 || '{}')
-              const 新 = {
-                开: 来.开 === undefined ? (旧.开 !== false) : Boolean(来.开),
-                时: Math.max(0, Math.min(23, Number(来.时 ?? 旧.时 ?? 23))),
-                分: Math.max(0, Math.min(59, Number(来.分 ?? 旧.分 ?? 30))),
-                会话: String(来.会话 ?? 旧.会话 ?? ''),
-              }
-              存配置({ 写日记: 新 })
-              日记账.日 = ''   // 改了时间或当前会话就允许今天重新执行
-              记一笔('日记设置已存：' + JSON.stringify(新))
-              return 回JSON(res, { ok: true, 写日记: 新 })
+              const sid = String(来.会话 ?? 来.sid ?? '')
+              if (!sid) return 回JSON(res, { ok: false, 原因: '不知道是哪个会话的设置' }, 400)
+              const 各 = { ...((旧 && 旧.各 && typeof 旧.各 === 'object') ? 旧.各 : {}) }
+              const 该 = { ...(各[sid] || {}) }
+              if (来.开 !== undefined) 该.开 = Boolean(来.开)
+              if (来.时 !== undefined) 该.时 = Math.max(0, Math.min(23, Number(来.时)))
+              if (来.分 !== undefined) 该.分 = Math.max(0, Math.min(59, Number(来.分)))
+              各[sid] = 该
+              存配置({ 写日记: { ...旧, 各 } })
+              // 改了开关或时间，今天允许重新来一次（只影响这个会话）
+              日记已跑.delete(sid + '|' + 今天串())
+              记一笔('日记设置已存（' + sid.slice(0, 18) + '）：' + JSON.stringify(该))
+              return 回JSON(res, { ok: true, 写日记: 读日记设置(sid) })
             } catch (e) {
               return 回JSON(res, { ok: false, 原因: String((e && e.message) || e) }, 400)
             }
