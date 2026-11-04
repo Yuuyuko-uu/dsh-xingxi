@@ -1919,38 +1919,87 @@ export function apply(ctx, 配置 = {}) {
   //     **工具给正文**（想细看哪一段，自己去读那一段）。
   // ═══════════════════════════════════════════════════════
 
+  /** 本机档案（设置里填的那两个）：支持「一个文件」也支持「一个文件夹」 */
   const 本机文件 = () => {
     const 存 = 读存配置()
     const 出 = []
-    if (存.记忆卡 && existsSync(存.记忆卡)) 出.push(存.记忆卡)
-    if (存.日记 && existsSync(存.日记)) 出.push(存.日记)
+    const 加 = (p, 前缀) => {
+      if (!p || !existsSync(p)) return
+      let st = null
+      try {
+        st = statSync(p)
+      } catch {
+        return
+      }
+      if (st.isDirectory()) {
+        // ⚠ 日记特别容易填成文件夹：一个目录直接 readFileSync 会报错，
+        //   结果就是「日记永远读不到」（用户实测踩过）
+        let 们 = []
+        try {
+          们 = readdirSync(p).filter((f) => /\.(md|txt)$/i.test(f)).sort()
+        } catch {}
+        for (const f of 们) 出.push({ 名: 前缀 + basename(f).replace(/\.(md|txt)$/i, ''), 路: join(p, f) })
+        return
+      }
+      if (!/\.(md|txt)$/i.test(p)) return
+      出.push({ 名: 前缀 + basename(p).replace(/\.(md|txt)$/i, ''), 路: p })
+    }
+    加(存.记忆卡, '')
+    加(存.日记, '日记/')
     return 出
   }
 
-  /** 某个会话的档案文件夹（有绑定走绑定，没有走默认） */
-  const 会话文件夹 = (sid) => {
-    const 项 = 列会话(活会话们()).find((x) => x.id === sid)
-    return 项 ? 项.目录 : ''
+  /** 把工具上下文里的会话 id 抠出来（不同版本给的位置不一样） */
+  const 取会话id = (exec) => {
+    if (!exec) return ''
+    // DSH 的工具上下文是 agent: { id }（ToolRunContext），**没有 sessionId 这个字段**
+    // （老代码读 exec.sessionId → 永远是空 → 绑定全查不到，这就是用户报的那个 bug）
+    const 候选 = [exec.agent && exec.agent.id, exec.agentId, exec.sessionId, exec.session && exec.session.id, exec.id]
+    for (const c of 候选) {
+      const t = String(c || '').trim()
+      if (t) return t
+    }
+    return ''
   }
+
+  /** 在绑定表里找这个会话的文件夹：带不带 session- 前缀都认 */
+  const 找绑定夹 = (sid) => {
+    if (!sid) return ''
+    let 绑 = {}
+    try {
+      绑 = 读存配置().绑定 || {}
+    } catch {}
+    if (绑[sid]) return String(绑[sid])
+    const 裸 = String(sid).replace(/^session-/, '')
+    for (const [k, v] of Object.entries(绑)) {
+      const kk = String(k)
+      if (kk === sid) return String(v)
+      if (kk.replace(/^session-/, '') === 裸) return String(v)
+    }
+    return ''
+  }
+
+  /** 某个会话的档案文件夹（列表里找 → 绑定表兜底） */
+  const 会话文件夹 = (sid) => {
+    if (!sid) return ''
+    try {
+      const 项 = 列会话(活会话们()).find((x) => x.id === sid)
+      if (项 && 项.目录 && existsSync(项.目录)) return 项.目录
+    } catch {}
+    const 绑 = 找绑定夹(sid)
+    return 绑 && existsSync(绑) ? 绑 : ''
+  }
+
 
   /** 档案里的所有 md：会话绑了文件夹就只读它，没绑才读本机那两份 */
   const 所有档案 = (sid) => {
     const 出 = []
-    let 夹 = ''
-    try {
-      夹 = 会话文件夹(sid)
-    } catch {}
+    const 夹 = 会话文件夹(sid)
+    // 没有自己的文件夹 → 用本机档案（这时本机文件已经带好 日记/ 前缀了）
     if (!夹 || !existsSync(夹)) {
-      try {
-        const 绑 = 读存配置().绑定 || {}
-        if (绑[sid] && existsSync(绑[sid])) 夹 = String(绑[sid])
-      } catch {}
-    }
-    // 没有自己的文件夹 → 用本机档案
-    if (!夹 || !existsSync(夹)) {
-      for (const p of 本机文件()) {
+      for (const f of 本机文件()) {
         try {
-          出.push({ 名: basename(p, '.md'), 路: p, 文: readFileSync(p, 'utf8') })
+          出.push({ 名: f.名, 路: f.路, 文: readFileSync(f.路, 'utf8') })
         } catch {}
       }
       return 出
@@ -2022,10 +2071,11 @@ export function apply(ctx, 配置 = {}) {
       } catch {}
     }
 
-    // 退回本机档案（只在会话没绑文件夹时用）
+    // 退回本机档案（只在会话没绑文件夹、或者文件夹里确实什么都没有时用）
     if (!卡路 && !日们.length) {
       const 存 = 读存配置()
       卡路 = String(存.记忆卡 || '')
+      // ⚠ 本机「日记」很可能是**一个文件夹**：直接当文件读会失败，日记就永远进不来
       日们 = 近几天日记文件(天)
       return { 夹, 卡路, 日们, 退的: true }
     }
@@ -2120,14 +2170,6 @@ export function apply(ctx, 配置 = {}) {
   try {
     const 工具服务 = typeof ctx.get === 'function' ? ctx.get('tools') : undefined
     if (工具服务 && typeof 工具服务.register === 'function') {
-      const 取卡 = (sid) => {
-        // 先看这个会话自己的文件夹（每个人记忆卡名字都不一样），再退回本机
-        const 档 = 本会话的档案(sid)
-        const 路 = 档.卡路
-        if (!路 || !existsSync(路)) return null
-        return { 路, 文: readFileSync(路, 'utf8') }
-      }
-
       工具服务.register({
         name: 'xingxi',
         description:
@@ -2145,9 +2187,19 @@ export function apply(ctx, 配置 = {}) {
           },
         },
         async execute(_a, exec) {
-          const 卡 = 取卡(String((exec && exec.sessionId) || ''))
-          if (!卡) return { ok: false, text: '没有设置记忆卡（先去星坊里指定那个文件）' }
-          return { ok: true, text: 卡.文 }
+          const sid = 取会话id(exec)
+          const 档 = 本会话的档案(sid)
+          const 有卡 = 档.卡路 && existsSync(档.卡路)
+          if (!有卡) {
+            记一笔('xingxi 取不到记忆卡：sid=' + sid + ' 夹=' + (档.夹 || '无') + ' 卡=' + (档.卡路 || '无'))
+            return {
+              ok: false,
+              text: 档.夹
+                ? '文件夹里没找到记忆卡：' + 档.夹 + '（看根下有没有文件名带「记忆卡」的 .md）'
+                : '这个会话还没指定文件夹（星坊 → 现在这个会话 → 选…）',
+            }
+          }
+          return { ok: true, text: readFileSync(档.卡路, 'utf8') }
         },
       })
       记一笔('工具 xingxi 挂上了（通读记忆卡）')
@@ -2184,7 +2236,7 @@ export function apply(ctx, 配置 = {}) {
         },
         async execute(args, exec) {
           try {
-            const sid = String((exec && exec.sessionId) || '')
+            const sid = 取会话id(exec)
             const 档 = 所有档案(sid)
             const 限 = Math.max(600, Math.min(20000, Number((args && args.最多字) || 4000)))
             const 词 = String((args && args.关键词) || '').trim()
@@ -2192,7 +2244,11 @@ export function apply(ctx, 配置 = {}) {
             const 名 = String((args && args.文件) || '').trim()
 
             if (!档.length) {
-              return { ok: false, text: '这个会话还没有档案（先去星坊里指定文件夹）' }
+              const 夹 = 会话文件夹(sid)
+              if (!夹) {
+                return { ok: false, text: '这个会话还没指定文件夹（星坊 → 现在这个会话 → 选…）。没绑定也读不到本机档案。' }
+              }
+              return { ok: false, text: '文件夹已绑定（' + 夹 + '），但里面没找到能读的 .md / .txt 文件' }
             }
 
             // 把文件按「一类一份」归拢，方便说清楚有什么
