@@ -1581,6 +1581,7 @@ function 读会话头(路径) {
   if (旧 && 旧.签名 === 签名) return 旧.值
 
   let 值 = { 标题: '', cwd: '', createdAt: 0, 深度: 0, 机器: false }
+  let 见过机器话 = false   // 看到过不是人说的东西（插件递的话、注入的上下文）
   try {
     const 缓 = readFileSync(路径).subarray(0, 4194304)
     const 帧们 = []
@@ -1612,9 +1613,11 @@ function 读会话头(路径) {
         }
         if (e.type === 'user/message') {
           const 来源 = (e.data && e.data.source && e.data.source.kind) || ''
-          // 拾星自己派出去的会话：它的第一条「用户消息」是插件塞的提示词
-          if (来源.startsWith('plugin:')) 值.机器 = true
-          if (来源 === 'runtime-context' && !值.标题) 值.机器 = true   // 一上来就是注入的上下文 → 机器开的
+          // ⭐ 0.2.4：判「机器工位」改成看**有没有一句人话**，不再看有没有插件的话。
+          //   以前只要扫描范围内出现过一条 `plugin:*` 就把整间标成机器，
+          //   于是「建库提示」「主动搭话」这类先塞一句的会话，整个从列表里消失。
+          //   拾星自己开出去的工位本来就没有人说话，判据一样成立。
+          if (!是真人说的(来源)) 见过机器话 = true
           if (!是真人说的(来源)) continue
           const c = e.data && e.data.content
           const t = (Array.isArray(c) ? c : []).filter((x) => x && x.type === 'text').map((x) => x.text).join(' ').trim()
@@ -1624,6 +1627,7 @@ function 读会话头(路径) {
       }
     }
   } catch {}
+  值.机器 = 见过机器话 && !值.标题
   会话目录缓存.set(路径, { 签名, 值 })
   return 值
 }
@@ -2206,7 +2210,6 @@ export function apply(ctx, 配置 = {}) {
   // ⭐ 0.2.1：写日记改成**按会话**管 —— 每个会话自己开、自己定时、写进自己的档案夹。
   //   以前是一份全局设置（开/时/分/会话），开一次等于替所有会话开。
   const 日记已跑 = new Set()      // `${会话}|${日期}`
-  const 日记在跑 = new Set()      // 正在递话的会话
 
   const 昨天串 = (日) => {
     try {
@@ -2218,6 +2221,39 @@ export function apply(ctx, 配置 = {}) {
   const 今天串 = () => {
     const d = new Date()
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+  }
+
+  /**
+   * ⭐ 0.2.4：「今天已经发过」要落盘。
+   *   以前这个记号只活在内存的 Set 里 —— 插件一重载（热更新、重启挂载）
+   *   就全忘了，同一天晚上会再提醒一次。现在记进配置的 `定时.已发`。
+   */
+  const 已发表 = (w) => (w && w.已发 && typeof w.已发 === 'object' ? w.已发 : {})
+  const 读定时已发 = (sid) => {
+    try {
+      const w = 读存配置().定时 || {}
+      const 已 = 已发表(w)
+      return String(已[String(sid)] || '')
+    } catch (e) {
+      return ''
+    }
+  }
+  const 写定时已发 = (sid, 日) => {
+    try {
+      const w = 读存配置().定时 || {}
+      const 已 = { ...已发表(w) }
+      for (const k of Object.keys(已)) if (已[k] !== 日) delete 已[k]   // 过期的不留，配置别越长越大
+      已[String(sid)] = 日
+      存配置({ 定时: { ...w, 已发: 已 } })
+    } catch (e) {}
+  }
+  const 清定时已发 = (sid) => {
+    try {
+      const w = 读存配置().定时 || {}
+      const 已 = { ...已发表(w) }
+      delete 已[String(sid)]
+      存配置({ 定时: { ...w, 已发: 已 } })
+    } catch (e) {}
   }
 
   /**
@@ -2325,7 +2361,12 @@ export function apply(ctx, 配置 = {}) {
       if (现在 < 设.时 * 60 + 设.分) continue
       const 键 = 会话id + '|' + 日
       if (日记已跑.has(键)) continue
+      if (读定时已发(会话id) === 日) {
+        日记已跑.add(键)      // 落盘记号说今天发过了（多半是重载前发的）—— 不再发
+        continue
+      }
       日记已跑.add(键)
+      写定时已发(会话id, 日)
       // ① 提醒它自己写日记（不是代写）
       if (设.自己) {
         跑日记(文件夹, 会话id, 日).catch(() => {})
@@ -2641,7 +2682,10 @@ export function apply(ctx, 配置 = {}) {
         description:
           '通读记忆卡：**一次**把整本记忆卡从头到尾读完（不分段，不用翻页）。' +
           '上下文被压缩之后用这个，读完就知道该记得什么了。',
-        parameters: {},
+        // ⚠ parameters 必须是**完整 JSON Schema**（根上要有 type: 'object'），
+        //   不能写成 `{}`、也不能直接给属性表 —— Trae 那类上游会对整包工具做校验，
+        //   一条不合格就整轮请求被拒（别的上游不校验，所以就它出问题）。
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
         output: {
           schema: {
             type: 'object',
@@ -2687,11 +2731,17 @@ export function apply(ctx, 配置 = {}) {
         description:
           '检索档案：想不起某件事（日期、原话、细节）时用它把那一段原文找出来，别猜。' +
           '可以给关键词、给日期、或者给文件名。日记是**按天分开**的，所以按日期检索最准。',
+        // ⚠ 完整 JSON Schema（根上要有 type: 'object' + properties），
+        //   以前直接把属性表当 parameters 递上去，根节点没有 type。
         parameters: {
-          关键词: { type: 'string', description: '要搜的词，比如「卖号」「第一次」' },
-          日期: { type: 'string', description: 'YYYY-MM-DD，查日记用（也认 11-03 这种）' },
-          文件: { type: 'string', description: '文件名或它的一部分' },
-          最多字: { type: 'number', description: '最多返回多少字，默认 4000' },
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            关键词: { type: 'string', description: '要搜的词，比如「卖号」「第一次」' },
+            日期: { type: 'string', description: 'YYYY-MM-DD，查日记用（也认 11-03 这种）' },
+            文件: { type: 'string', description: '文件名或它的一部分' },
+            最多字: { type: 'number', description: '最多返回多少字，默认 4000' },
+          },
         },
         output: {
           schema: {
@@ -3777,6 +3827,7 @@ export function apply(ctx, 配置 = {}) {
               const sid = String(来.会话 ?? 来.sid ?? '')
               if (!sid) return 回JSON(res, { ok: false, 原因: '不知道是哪个会话的设置' }, 400)
               const 各 = { ...((旧 && 旧.各 && typeof 旧.各 === 'object') ? 旧.各 : {}) }
+              const 旧设 = 读定时设置(sid)     // 解析过默认值的那一份
               const 该 = { ...(各[sid] || {}) }
               if (来.时 !== undefined) 该.时 = Math.max(0, Math.min(23, Number(来.时)))
               if (来.分 !== undefined) 该.分 = Math.max(0, Math.min(59, Number(来.分)))
@@ -3789,9 +3840,20 @@ export function apply(ctx, 配置 = {}) {
               else if (该.自己) 该.星汐 = false
               各[sid] = 该
               存配置({ 定时: { ...旧, 各 } })
-              日记已跑.delete(sid + '|' + 今天串())
-              记一笔('定时设置已存（' + sid.slice(0, 18) + '）：' + JSON.stringify(该))
-              return 回JSON(res, { ok: true, 定时: 读定时设置(sid) })
+              // ⭐ 0.2.4：只有「时 / 分 / 模式」真的变了，才允许今天重跑一次。
+              //   以前这里无条件清空「今天已发」，点一次「保存」什么都不改，
+              //   一分钟内就会把同一天的提醒再发一遍。
+              const 新设 = 读定时设置(sid)
+              const 变了 =
+                旧设.时 !== 新设.时 || 旧设.分 !== 新设.分 || 旧设.自己 !== 新设.自己 || 旧设.星汐 !== 新设.星汐
+              if (变了) {
+                日记已跑.delete(sid + '|' + 今天串())
+                清定时已发(sid)
+              }
+              记一笔(
+                '定时设置已存（' + sid.slice(0, 18) + '）：' + JSON.stringify(该) + (变了 ? '（改过，今天可重跑）' : '（没改，今天不重跑）')
+              )
+              return 回JSON(res, { ok: true, 定时: 读定时设置(sid), 变了 })
             } catch (e) {
               return 回JSON(res, { ok: false, 原因: String((e && e.message) || e) }, 400)
             }
