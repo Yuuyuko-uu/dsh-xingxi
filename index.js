@@ -1047,10 +1047,29 @@ export function 算进度(文件夹) {
   return 最大
 }
 
-/** 把按天的料落成文本文件 */
-export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0, 已到 = 0) {
+/**
+ * ⭐ 0.2.5：这个文件夹还有没有「没跑完的拾星」？
+ *   ⚠ 必须拿**现在的进度**去比，不能拿任务.json 里那串旧数字比 ——
+ *   以前跑完了也一直挂着「上次没跑完」，用户点「接着拾」只得到一句「没有可拾取的日子」。
+ */
+export function 算没跑完(文件夹) {
+  try {
+    const 任 = join(文件夹, '.拾星', '任务.json')
+    if (!existsSync(任)) return null
+    const t = JSON.parse(readFileSync(任, 'utf8'))
+    if (!t || !t.最晚) return null
+    if (t.完成) return null
+    const 进 = 算进度(文件夹)
+    if (进 && 进 >= String(t.最晚)) return null
+    return { 已到: 进 || t.已到 || '', 最晚: t.最晚, 最早: t.最早 || '' }
+  } catch (e) {
+    return null
+  }
+}
+
+/** 把按天的料落成文本文件 */export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0, 已到 = 0) {
   const 切 = 按天切(会话id, 已整理到, 已到)
-  if (!切.料.length) return { ok: false, 原因: 切.缺[0] || '没有可整理的日子' }
+  if (!切.料.length) return { ok: false, 空: true, 原因: 切.缺[0] || '没有可整理的日子' }
   // ⭐ 一次只切前面几天（批天数）：一个会话塞太多天，它读到第三天就不干了
   const 全天 = 切.料.map(([日]) => 日)
   // ⚠ 已经有真日记的那天直接跳过：进度账不准（老版本没写账本、手改过文件）时也不会重做
@@ -1064,8 +1083,11 @@ export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0,
       return false
     }
   }
-  const 可做 = 切.料.filter(([日]) => !真日记(日))
-  if (!可做.length) return { ok: false, 原因: '剩下这些天都已经写过日记了' }
+  // ⭐ 0.2.5：带水位的（补星 / 只补当天后半段）**不许按真日记跳过**。
+  //   那一天的日记本来就该已经在了 —— 跳过它等于「补星永远补不上」，
+  //   别人实测：点补星只回一句「今天还没有新内容」。整天重做（水位 0）才跳过。
+  const 可做 = 已到 ? 切.料 : 切.料.filter(([日]) => !真日记(日))
+  if (!可做.length) return { ok: false, 空: true, 原因: '这些天都已经写过日记了，没有要重做的' }
   const 用 = 最多天 > 0 ? 可做.slice(0, 最多天) : 可做
   const 料目录 = join(文件夹, '.拾星', '料')
   try {
@@ -3100,9 +3122,23 @@ export function apply(ctx, 配置 = {}) {
     const 昨天 = new Date(Date.parse(今天 + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10)
     const 水位 = 只今天 ? 读水位(文件夹) : 0
     const 料 = 准备料(源, 文件夹, 只今天 ? 昨天 : 已, 批天数, 水位)
-    if (只今天 && !料.ok) return { ok: false, 原因: '今天还没有新内容' }
-    记一笔('派一批：已到 ' + (已 || '开头') + ' ｜料 ' + JSON.stringify({ ok: 料.ok, 天数: 料.天数, 最早: 料.最早, 最晚: 料.最晚 }))
-    if (!料.ok) return { ok: false, 原因: 料.原因 }
+    记一笔('派一批：已到 ' + (已 || '开头') + ' ｜水位 ' + (水位 || 0) + ' ｜料 ' + JSON.stringify({ ok: 料.ok, 空: 料.空, 天数: 料.天数, 最早: 料.最早, 最晚: 料.最晚 }))
+    if (!料.ok) {
+      // ⭐ 0.2.5：真的没东西了就把任务标成完成 —— 否则「上次没跑完」会一直挂着，
+      //   用户点「接着拾」只拿到一句「没有可整理的日子」，看着就像插件坏了。
+      if (料.空 && !只今天) {
+        try {
+          writeFileSync(任路, JSON.stringify({ ...旧任, 完成: true, 已到: 已 || 旧任.已到 || '' }, null, 2), 'utf8')
+        } catch (e) {}
+        记一笔('派一批：没东西可做了，任务标完成（到 ' + (已 || '开头') + '）')
+      }
+      const 话 = 只今天
+        ? (料.空 ? '今天还没有新内容' : 料.原因)
+        : 料.空
+          ? (已 ? '已经整理到 ' + 已 + '，后面没有新内容了' : 料.原因)
+          : 料.原因
+      return { ok: false, 空: 料.空, 原因: 话 }
+    }
 
     // 模型：**星坊里选了就听她的**；没选才退回主会话的默认模型。
     //   ⚠ 之前这里写死成「只用默认模型」，导致星坊里选的模型不生效（她录演示时当场撞上）。
@@ -3629,12 +3665,8 @@ export function apply(ctx, 配置 = {}) {
             // 每个会话的文件夹里有没有「没跑完的拾星」
             for (const x of 列) {
               try {
-                const 任 = join(x.目录, '.拾星', '任务.json')
-                if (!existsSync(任)) continue
-                const t = JSON.parse(readFileSync(任, 'utf8'))
-                if (t && t.最晚 && String(t.已到 || '') < String(t.最晚)) {
-                  x.没跑完 = { 已到: t.已到 || '', 最晚: t.最晚, 最早: t.最早 || '' }
-                }
+                const 没 = 算没跑完(x.目录)
+                if (没) x.没跑完 = 没
               } catch {}
             }
             return 回JSON(res, { 会话: 列, 根: 档案根, 定时: 读定时设置(地址.searchParams.get('sid') || '') })
