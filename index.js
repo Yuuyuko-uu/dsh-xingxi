@@ -3137,7 +3137,7 @@ export function apply(ctx, 配置 = {}) {
     // ⭐ 先占坑再开会话：「上次派遣」写在新建会话之前 ——
     //   别的调度器（或者重启后这一份）马上就能看到，不会再派第二次
     try {
-      writeFileSync(任路, JSON.stringify({ ...旧任, 上次派遣: Date.now() }, null, 2), 'utf8')
+      writeFileSync(任路, JSON.stringify({ ...旧任, 上次派遣: Date.now(), 上次进度: 算进度(文件夹) }, null, 2), 'utf8')
     } catch {}
     globalThis[锁键] = Date.now()
 
@@ -3628,6 +3628,17 @@ export function apply(ctx, 配置 = {}) {
         //   昨天开的任务做完 11-06 就被标完成，今天 11-07 新聊的内容永远进不来
         //   （用户报的「7 号好像没人说话一样，抓不到」）。
         //   现在直接问源会话：进度之后还有没有料？有就接着派，没有才收工。
+        // 🛑 0.2.8 止血：上一批派出去之后进度没往前走（子代理没写出日记 / 只切到半截），
+        //   就别再派了 —— 否则源会话一直在长，永远「还有料」，每 90 秒新开一个会话。
+        const 上次进度 = String(任务.上次进度 || '')
+        if (上次进度 && 上次进度 === 进度) {
+          if (!任务.暂停) {
+            任务.暂停 = true
+            try { writeFileSync(join(夹, '.拾星', '任务.json'), JSON.stringify(任务, null, 2), 'utf8') } catch {}
+            记一笔('调度：' + 夹 + ' 上一批没推进（还停在 ' + (进度 || '开头') + '），先停下不再自动派')
+          }
+          continue
+        }
         let 还有料 = false
         try {
           const 源id = 找源会话(夹)
