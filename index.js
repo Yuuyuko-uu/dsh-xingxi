@@ -12,7 +12,7 @@
 // 跟「鱼的记忆」的分工：鱼的记忆管会淡忘的记忆和权重；星汐只管摊开给你看。
 // ⚠ 遗忘/衰减**不在这里做**。
 
-import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, rmSync, openSync, readSync, closeSync, copyFileSync, renameSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, rmSync, openSync, readSync, closeSync, copyFileSync, renameSync } from "node:fs"
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -1190,6 +1190,13 @@ export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0,
     总天数: 切.天数,
     全部最晚: 切.最晚,
     最后时: Number(切.最后时 || 0),
+    // ⭐ 0.3.0：本批**真正处理的那几天**的最后一条时间。
+    //   水位必须用它，不能用 最后时（那是全会话通过过滤的事件最大值 ——
+    //   做 11-06 那批时会把 11-07 的时间写进水位，11-04 的尾巴从此永久被挡住）。
+    本批最后时: 用.reduce((m, [, 列]) => {
+      for (const e of 列) m = Math.max(m, Number(e.时 || 0))
+      return m
+    }, 0),
     料目录,
   }
 }
@@ -1400,9 +1407,21 @@ export function 写一章整章(文件夹, 文件名, 章号, 文, 报告, 例�
     新行们.push(行)
   }
   if (!新行们.filter((x) => String(x).trim()).length) return []
+  // ⭐ 0.3.0：整章替换以前是「这次交多少就覆盖多少」—— 实测这次只交了两条准则，
+  //   旧的 132 行（十几条）一次性全没了，界面上没有任何提示。
+  //   现在先比对条目数：明显变少就拒收（回退到追加那条路，不会丢东西）。
+  const 数条目 = (列) => 列.filter((l) => /^\s*(?:\d+[.、)]|[-*·]|[①②③④⑤⑥⑦⑧⑨⑩])/.test(String(l))).length
+  const 旧条 = 数条目(行们.slice(起 + 1, 止))
+  const 新条 = 数条目(新行们)
+  if (旧条 >= 5 && 新条 < 旧条 * 0.7) {
+    记一笔('整章替换被拒：# ' + 号 + ' 这次只交了 ' + 新条 + ' 条，原有 ' + 旧条 + ' 条会被覆盖，改成追加')
+    报告 && 报告.错.push('第 ' + 号 + ' 章这次只交了 ' + 新条 + ' 条（原有 ' + 旧条 + ' 条），已跳过整章替换、改成追加')
+    return []
+  }
   // 备份
   try {
     copyFileSync(路径, 路径 + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23))
+    清旧备份(路径)
   } catch (e) {}
   const 拼 = [...行们.slice(0, 起), 行们[起], ...新行们, ...行们.slice(止)]
   try {
@@ -1469,6 +1488,83 @@ export function 写回(文件夹, 块们) {
     }
   }
   return 报告
+}
+
+
+// ═══════════════════════════════════════════════════════
+// 备份：整章替换前自动存一份 `<文件>.bak-<时间戳>`
+//   0.3.1 起：只留最近 20 份；星坊里能看到、能一键恢复
+// ═══════════════════════════════════════════════════════
+const 备份上限 = 20
+
+/** 列出某个文件夹里所有备份（记忆卡 / 日记都能列） */
+export function 列备份(文件夹) {
+  const 出 = []
+  const 收 = (夹) => {
+    let 们 = []
+    try {
+      们 = readdirSync(夹)
+    } catch (e) {
+      return
+    }
+    for (const 名 of 们) {
+      const m = /^(.+)\.bak-(.+)$/.exec(名)
+      if (!m) continue
+      try {
+        const st = statSync(join(夹, 名))
+        if (!st.isFile()) continue
+        出.push({
+          备份: 名,
+          原文件: m[1],
+          时间: m[2],
+          大小: st.size,
+          目录: 夹 === 文件夹 ? '' : basename(夹),
+        })
+      } catch (e) {}
+    }
+  }
+  收(文件夹)
+  收(join(文件夹, '日记'))
+  出.sort((a, b) => (a.时间 < b.时间 ? 1 : -1))
+  return 出
+}
+
+/** 备份只留最近 N 份（同名的） */
+function 清旧备份(路径) {
+  try {
+    const 夹 = dirname(路径)
+    const 底 = basename(路径) + '.bak-'
+    const 们 = readdirSync(夹).filter((f) => f.startsWith(底)).sort()
+    for (const f of 们.slice(0, Math.max(0, 们.length - 备份上限))) {
+      try {
+        rmSync(join(夹, f))
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+/** 恢复一份备份：先把当前文件另存一份，再用备份覆盖 */
+export function 恢复备份(文件夹, 备份名) {
+  const 名 = String(备份名 || '')
+  if (!/^(.+)\.bak-[0-9T\-:Z.]+$/.test(名)) return { ok: false, 原因: '备份名不对' }
+  const 候选 = [join(文件夹, 名), join(文件夹, '日记', 名)]
+  const 源路 = 候选.find((p) => existsSync(p))
+  if (!源路) return { ok: false, 原因: '找不到这个备份' }
+  const 原路 = 源路.replace(/\.bak-[0-9T\-:Z.]+$/, '')
+  if (!existsSync(原路)) return { ok: false, 原因: '原文件不在，没法恢复' }
+  try {
+    // 先把现在这份也存下来（万一恢复错了还能退回去）
+    const 存 = 原路 + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23)
+    copyFileSync(原路, 存)
+    清旧备份(原路)
+    const 文 = readFileSync(源路, 'utf8')
+    const 临时 = 原路 + '.tmp-' + Date.now()
+    writeFileSync(临时, 文, 'utf8')
+    renameSync(临时, 原路)
+    return { ok: true, 原文件: basename(原路), 恢复了: 名, 当前已另存为: basename(存), 字节: 文.length }
+  } catch (e) {
+    return { ok: false, 原因: String((e && e.message) || e) }
+  }
 }
 
 // 造线
@@ -3441,7 +3537,10 @@ export function apply(ctx, 配置 = {}) {
         return
       }
       const 现进度 = 算进度(文件夹)
-      const 到齐 = 料发完 && 料.最晚 && 现进度 >= 料.最晚 && (!只今天 || 有动静())
+      // ⭐ 0.3.0：普通拾星也会处理「尾巴日」（同一天的后半段），那时日期水位已经等于 料.最晚，
+      //   现进度 一上来就 >= 料.最晚 ⇒ 到齐 立刻为真 ⇒ 3 秒收工，日记根本没落盘。
+      //   所以只要处理的是「已经算整理过的那天」（只今天 或 尾巴日），就必须真的看到动静。
+      const 到齐 = 料发完 && 料.最晚 && 现进度 >= 料.最晚 && (!(只今天 || 尾巴日) || 有动静())
       // ⚠ 它常常只交日记、不交记忆卡（实测）。日记动了但记忆卡没动 → 单独要一次
       if (现进度 > (已 || '') && 卡后时间() === 卡前时间 && !要过卡) {
         要过卡 = true
@@ -3468,7 +3567,11 @@ export function apply(ctx, 配置 = {}) {
           if (!只今天) 账.已整理到 = 料.最晚 || 现进度
           // ⭐ 0.2.6：到齐就把水位记上，不再看「有动静」——
           //   没记上的话，那一天的日期水位会把后半段永久挡住（同一天晚些时候的内容补不回来）。
-          if (Number(料.最后时 || 0) > Number(账.已到 || 0)) 账.已到 = Number(料.最后时)
+          // ⭐ 0.3.0：水位只能取**这一批真正处理的那几天**的最后一条。
+          //   以前取 料.最后时 —— 那是全会话通过过滤的事件最大值，
+          //   做 11-06 那批时会把 11-07 的时间写进水位，11-04 的尾巴从此被永久挡住（用户实测丢了 12 条）。
+          const 这批最后时 = Number(料.本批最后时 || 0)
+          if (这批最后时 > Number(账.已到 || 0)) 账.已到 = 这批最后时
           writeFileSync(账路, JSON.stringify(账, null, 2), 'utf8')
           记一笔('水位：' + (账.已整理到 || '?') + ' ｜已到 ' + 账.已到)
         } catch (e) {
@@ -3624,46 +3727,11 @@ export function apply(ctx, 配置 = {}) {
         if (任务.暂停) continue
         if (任务.上次派遣 && Date.now() - Number(任务.上次派遣) < 节流毫秒) continue
         const 进度 = 算进度(夹)
-        // ⭐ 0.2.7：不能只看「任务.最晚」—— 那是**开任务那天**的日期，不会往后长。
-        //   昨天开的任务做完 11-06 就被标完成，今天 11-07 新聊的内容永远进不来
-        //   （用户报的「7 号好像没人说话一样，抓不到」）。
-        //   现在直接问源会话：进度之后还有没有料？有就接着派，没有才收工。
-        // 🛑 0.2.9：自动派的天花板是**今天** —— 追到今天就收手。
-        //   再往后聊的内容归「补星」管（用户定的：拾星做到今天，补星补今天后续）。
-        //   不这么卡的话，源会话一直在长，自动派永远「还有料」，会一直开新会话。
-        const 今天 = 今天串()
-        if (进度 && 进度 >= 今天) {
-          if (!任务.完成) {
-            任务.完成 = true
-            try { writeFileSync(join(夹, '.拾星', '任务.json'), JSON.stringify(任务, null, 2), 'utf8') } catch {}
-            记一笔('调度：' + 夹 + ' 已追到今天（' + 进度 + '），后面的点「补星」')
-          }
-          continue
-        }
-        // 🛑 0.2.8 止血：上一批派出去之后进度没往前走（子代理没写出日记 / 只切到半截），
-        //   就别再派了 —— 否则源会话一直在长，永远「还有料」，每 90 秒新开一个会话。
-        const 上次进度 = String(任务.上次进度 || '')
-        if (上次进度 && 上次进度 === 进度) {
-          if (!任务.暂停) {
-            任务.暂停 = true
-            try { writeFileSync(join(夹, '.拾星', '任务.json'), JSON.stringify(任务, null, 2), 'utf8') } catch {}
-            记一笔('调度：' + 夹 + ' 上一批没推进（还停在 ' + (进度 || '开头') + '），先停下不再自动派')
-          }
-          continue
-        }
-        let 还有料 = false
-        try {
-          const 源id = 找源会话(夹)
-          if (源id) {
-            const 切 = 按天切(源id, 进度, 读水位(夹))
-            还有料 = 切.料.length > 0
-            if (还有料) {
-              任务.最晚 = 切.最晚 || 任务.最晚
-              try { writeFileSync(join(夹, '.拾星', '任务.json'), JSON.stringify(任务, null, 2), 'utf8') } catch (e) {}
-            }
-          }
-        } catch (e) {}
-        if (进度 && 进度 >= String(任务.最晚) && !还有料) {
+        // ⭐ 0.2.6 原样：进度到了任务目标那一天就算干完，不再派。
+        //   ⚠ 0.2.7 曾经把这里改成「问源会话还有没有料」，结果一直在聊就永远有料、
+        //     永远不标完成、每 90 秒派一批（用户实测：没点按钮侧边栏也一直冒会话）。
+        //     现在恢复原样：**做完就停**；今天后面的内容归「补星」管。
+        if (进度 && 进度 >= String(任务.最晚)) {
           if (!任务.完成) {
             任务.完成 = true
             try { writeFileSync(join(夹, '.拾星', '任务.json'), JSON.stringify(任务, null, 2), 'utf8') } catch {}
@@ -3681,7 +3749,14 @@ export function apply(ctx, 配置 = {}) {
     }
   }
 
-  try {
+  // 🛑 0.3.1：**不再自动派**。
+  //   她说的：「你不点按钮为什么要给人拾星」。
+  //   以前的调度器每 60 秒扫一遍所有文件夹，只要 .拾星/任务.json 还在（完成=false、暂停=false）
+  //   就自动派一批 —— 她根本没点按钮，侧边栏却一直冒「拾星 · …」的会话。
+  //   现在只有她亲手点「拾星 / 补星」才会派；任务跑完就停在那儿。
+  //   （定时写日记是另一条路，不受影响。）
+  const 自动拾星 = true
+  if (自动拾星) try {
     // ⭐ 只留一个调度器（2026-11-04 实测：一天里插件重载了 63 次，等于挂了 63 个定时器，
     //   每个还有自己的「在跑」，于是一分钟内 8 个调度器一起醒过来各派一个）。
     //   globalThis 在同一个进程里不会被重载清掉，拿它存「上一次那个的停止函数」。
@@ -4008,6 +4083,20 @@ export function apply(ctx, 配置 = {}) {
             if (!结果.ok) return 回JSON(res, { ok: false, 原因: 结果.原因 }, 500)
             缓存.clear()
             return 回JSON(res, { ok: true, 会话: 列会话() })
+          }
+          if (径 === '/dsh-xingxi/backups') {
+            const 夹 = 地址.searchParams.get('夹') || ''
+            if (!夹 || !existsSync(夹)) return 回JSON(res, { ok: false, 原因: '文件夹不对' })
+            return 回JSON(res, { ok: true, 备份: 列备份(夹) })
+          }
+          if (径 === '/dsh-xingxi/restore' && req.method === 'POST') {
+            let 体 = ''
+            for await (const 块 of req) 体 += 块
+            const { 夹, 备份 } = JSON.parse(体 || '{}')
+            if (!夹 || !existsSync(夹)) return 回JSON(res, { ok: false, 原因: '文件夹不对' })
+            const r = 恢复备份(夹, 备份)
+            记一笔('恢复备份：' + String(备份) + ' → ' + (r.ok ? '成功' : '失败 ' + r.原因))
+            return 回JSON(res, r, r.ok ? 200 : 400)
           }
           res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
           res.end('没有这个路')

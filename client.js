@@ -1344,6 +1344,34 @@ window.__ModuleLoader__.load({
           h('span', { style: 值式 }, 值 || '—'),
           注 ? h('span', { style: 注式 }, 注) : null)
 
+      // ⭐ 0.3.1：备份列表（记忆卡整章替换前会自动存 .bak-*）
+      const [备份们, 设备份们] = useState([])
+      const 读备份 = async () => {
+        const 夹 = (会话 && 会话.目录) || ''
+        if (!夹) return
+        try {
+          const r = await fetch('/dsh-xingxi/backups?夹=' + encodeURIComponent(夹), { cache: 'no-store' })
+          const j = await r.json()
+          if (j && j.ok) 设备份们(j.备份 || [])
+        } catch (e) {}
+      }
+      const 恢复备份 = async (备份名) => {
+        const 夹 = (会话 && 会话.目录) || ''
+        if (!夹 || !window.confirm('用这份备份覆盖当前文件？\n\n' + 备份名 + '\n\n（当前这份会先另存一份，恢复错了还能退）')) return
+        try {
+          const r = await fetch('/dsh-xingxi/restore', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ 夹, 备份: 备份名 }),
+          })
+          const j = await r.json()
+          window.alert(j && j.ok ? '恢复好了：' + j.原文件 + '（当前那份存成了 ' + j.当前已另存为 + '）' : '恢复失败：' + ((j && j.原因) || '未知'))
+          await 读备份()
+        } catch (e) {
+          window.alert('恢复失败：' + String((e && e.message) || e))
+        }
+      }
+
       const 卡 = (标题, 副, 内容们) =>
         h('div', { style: 卡片 },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -1603,6 +1631,20 @@ window.__ModuleLoader__.load({
                   跑.ok
                     ? `开好了：切了 ${跑.天数} 天（${跑.最早} ~ ${跑.最晚}），新会话已经领到活儿。`
                     : String(跑.原因 || '没跑成'))
+              : null,
+          ]),
+          卡('备份', '整章替换记忆卡之前会自动存一份；点「恢复」用旧的那份盖回来', [
+            h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
+              h('button', { style: { ...小按钮, padding: '6px 12px' }, onClick: 读备份 }, '看备份'),
+              h('span', { style: { fontSize: 11, opacity: 0.4 } }, '只有在替换过记忆卡之后才会有')),
+            (备份们 || []).length
+              ? h('div', { style: { marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 } },
+                  (备份们 || []).slice(0, 12).map((b) =>
+                    h('div', { key: b.备份, style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5 } },
+                      h('span', { style: { flex: 'none', opacity: 0.45 } }, (b.目录 ? b.目录 + '/' : '') + b.原文件),
+                      h('span', { style: { flex: 1, opacity: 0.35 } }, String(b.时间).slice(0, 19) + ' · ' + Math.round(b.大小 / 1024) + 'KB'),
+                      h('button', { style: { ...小按钮, padding: '3px 10px' }, onClick: () => 恢复备份(b.备份) }, '恢复')))
+                )
               : null,
           ]),
           定时卡,
