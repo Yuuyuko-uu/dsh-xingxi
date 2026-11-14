@@ -663,6 +663,44 @@ export function 毫秒转日(ms) {
   }
 }
 
+/**
+ * 定时拾星没派成的时候，下一跳怎么走。
+ * 抽成纯函数是为了能测：这三条是「到点不跑」那个 bug 的根子。
+ *
+ *  - 空料（今天还没有新内容）不算完成：隔 10 分钟再试，23:59 收手
+ *  - 被节流挡住（刚派过）：不是失败，下一分钟再来
+ *  - 别的失败：5 分钟后再试
+ */
+export function 定时下一步({ 原因 = '', 空料次数 = 0, 现在分钟 = 0 } = {}) {
+  const 话 = String(原因 || '')
+  const 分钟 = Number(现在分钟) || 0
+  const 收手 = 分钟 >= 23 * 60 + 59
+  if (/今天还没有新内容/.test(话)) {
+    return {
+      空料次数: 空料次数 + 1,
+      等毫秒: 10 * 60 * 1000,
+      完: 收手,
+      说: 收手 ? '23:59 了，今天不再试' : ('今天还没新内容，10 分钟后再看（第 ' + (空料次数 + 1) + ' 次）'),
+    }
+  }
+  if (/刚派过/.test(话)) {
+    return { 空料次数, 等毫秒: 60 * 1000, 完: false, 说: '刚派过，下一分钟再试' }
+  }
+  return { 空料次数, 等毫秒: 5 * 60 * 1000, 完: false, 说: '没派成（' + (话 || '没说什么') + '），5 分钟后再试' }
+}
+
+/**
+ * 把「拾星 · X · 2026-11-07」这种自己起过的标题还原成干净的名字。
+ * 派一批时拿到的 项.名 可能是上一批的工人（标题里已经带过前缀和日期），
+ * 不剥干净就会越叠越长：「拾星 · 拾星 · … · 2026-11-07 · 2026-11-07」。
+ */
+export function 净会话名(名) {
+  return String(名 || '')
+    .replace(/^(?:拾星\s*·\s*)+/, '')
+    .replace(/\s*·\s*\d{4}-\d{2}-\d{2}\s*$/, '')
+    .trim()
+}
+
 export function 按天切(会话id, 已整理到 = '', 已到 = 0, 截止 = 0) {
   const { 事件, 缺 } = 读会话(会话id)
   const 按天 = new Map()
@@ -1150,7 +1188,16 @@ export function 准备料(会话id, 文件夹, 已整理到 = '', 最多天 = 0,
       const 原路 = join(原文夹, 日 + '.txt')
       if (!existsSync(原路)) writeFileSync(原路, 文, 'utf8')
       // ⭐ 0.2.2：同一天后来又聊了（补星）→ **追加**，不覆盖前面已经留好的原文
-      else if (已到 || 尾巴) appendFileSync(原路, String.fromCharCode(10) + '── 之后 ──' + String.fromCharCode(10) + 文, 'utf8')
+      // ⭐ 0.3.2（issue #2）：追加前先看一眼是不是已经有了 —— 上一批写完原文、
+      //   账本水位还没落盘就断了的话，下一批会把同一段再追一遍（实测重复 2394 字）。
+      else if (已到 || 尾巴) {
+        try {
+          const 旧文 = readFileSync(原路, 'utf8')
+          if (!旧文.includes(文.trim())) {
+            appendFileSync(原路, String.fromCharCode(10) + '── 之后 ──' + String.fromCharCode(10) + 文, 'utf8')
+          }
+        } catch (e) {}
+      }
     } catch (e) {
       return { ok: false, 原因: '写不了料：' + String((e && e.message) || e) }
     }
@@ -1262,6 +1309,19 @@ export function 解析文件块(文本) {
     if (当前) 当前.文 += 行 + '\n'
   }
   if (当前) 结果.文件.push(当前)
+  // ⭐ 0.3.2（issue #2）：同一条消息里重复的块（块名 + 正文都一样）只留第一份。
+  //   模型被反复触发时会连着交两三遍全套，以前整块处理两遍，档案里就出现大段重复。
+  {
+    const 见过 = new Set()
+    const 留下 = []
+    for (const b of 结果.文件) {
+      const 指纹 = String(b.名 || '') + '\u0000' + String(b.文 || '').trim()
+      if (见过.has(指纹)) continue
+      见过.add(指纹)
+      留下.push(b)
+    }
+    结果.文件 = 留下
+  }
   if (账本行 && 账本行.trim()) {
     try {
       结果.账本 = JSON.parse(账本行.trim())
@@ -2488,8 +2548,23 @@ export function apply(ctx, 配置 = {}) {
     // 没有兜底：它自己会写就写，不会写就是没写（不做「插件替它落盘」那一套）
   }
 
-  const 查定时 = () => {
-    const d = new Date()
+  // 每个会话今天试到哪一步了（只在内存里，重载就重来；落盘的「已发」只在真派成时写）
+  const 定时进度 = new Map() // sid -> { 日, 完, 下次, 空料 }
+  let 查定时跑着 = false     // 派一批可能要几十秒，别让下一跳叠上来
+
+  const 查定时 = async () => {
+    if (查定时跑着) return
+    查定时跑着 = true
+    try {
+      await 查定时一轮()
+    } catch (e) {
+      记一笔('定时出错：' + String((e && e.message) || e))
+    } finally {
+      查定时跑着 = false
+    }
+  }
+
+  const 查定时一轮 = async () => {    const d = new Date()
     const 现在 = d.getHours() * 60 + d.getMinutes()
     const 日 = 今天串()
     const 夹们 = new Map()
@@ -2505,6 +2580,10 @@ export function apply(ctx, 配置 = {}) {
         名们.set(String(x.id), x.名 || '')
       }
     } catch (e) {}
+    // ⭐ 一轮只派一个：剩下的下一分钟接着派。
+    //   以前一轮把五个会话全派一遍，可「派一批」自己有三道闸（一分半 / 30 秒只放一个），
+    //   除了第一个全被挡回来 —— 挡回来还算「今天已发」，于是当天再也不会跑。
+    let 本轮派过 = false
     for (const [会话id, 文件夹] of 夹们) {
       if (!文件夹) continue
       const 设 = 读定时设置(会话id)
@@ -2516,22 +2595,51 @@ export function apply(ctx, 配置 = {}) {
         日记已跑.add(键)      // 落盘记号说今天发过了（多半是重载前发的）—— 不再发
         continue
       }
-      日记已跑.add(键)
-      写定时已发(会话id, 日)
-      // ① 提醒它自己写日记（不是代写）
-      if (设.自己) {
-        跑日记(文件夹, 会话id, 日).catch(() => {})
+      let 进度 = 定时进度.get(会话id)
+      if (!进度 || 进度.日 !== 日) {
+        进度 = { 日, 完: false, 下次: 0, 空料: 0 }
+        定时进度.set(会话id, 进度)
       }
-      // ② 让拾星去做（只卡 / 卡+日记），跟手动点「拾星」走同一条路
+      if (进度.完) { 日记已跑.add(键); continue }
+      if (Date.now() < 进度.下次) continue
+      if (本轮派过) continue
+      本轮派过 = true
+
+      let 成了 = false
+      let 原因 = ''
       if (设.星汐) {
+        // 让拾星去做（只卡 / 卡+日记），跟手动点「拾星」走同一条路
         try {
-          派一批({ id: 会话id, 目录: 文件夹, 名: 名们.get(会话id) || '' }, { 只今天: true, 写日记: true })
-            .then((r) => 记一笔('定时拾星：' + (r && r.ok ? '派好了' : '没派：' + (r && r.原因))))
-            .catch((e) => 记一笔('定时拾星失败：' + String((e && e.message) || e)))
+          const r = await 派一批({ id: 会话id, 目录: 文件夹, 名: 名们.get(会话id) || '' }, { 只今天: true, 写日记: true })
+          成了 = Boolean(r && r.ok)
+          原因 = String((r && r.原因) || '')
         } catch (e) {
-          记一笔('定时拾星异常：' + String((e && e.message) || e))
+          原因 = String((e && e.message) || e)
+        }
+      } else if (设.自己) {
+        // 只提醒它自己写日记（不是代写）
+        try {
+          await 跑日记(文件夹, 会话id, 日)
+          成了 = true
+        } catch (e) {
+          原因 = String((e && e.message) || e)
         }
       }
+
+      if (成了) {
+        进度.完 = true
+        日记已跑.add(键)
+        // ⭐ 只有**真派成**才写「今天已发」—— 以前先写后派，一次没派成当天就废了
+        写定时已发(会话id, 日)
+        记一笔('定时：' + 会话id.slice(0, 12) + ' 今天派成了')
+        continue
+      }
+
+      const 下一跳 = 定时下一步({ 原因, 空料次数: 进度.空料, 现在分钟: 现在 })
+      进度.空料 = 下一跳.空料次数
+      进度.下次 = Date.now() + 下一跳.等毫秒
+      if (下一跳.完) 进度.完 = true
+      记一笔('定时：' + 会话id.slice(0, 12) + ' ' + 下一跳.说)
     }
   }
 
@@ -3242,6 +3350,12 @@ export function apply(ctx, 配置 = {}) {
     // ⚠ 读的必须是**绑定的那个源会话**。以前用 项.id（文件夹条目自己的 id），
     //   结果切出来的是「拾星刚开的那个空会话」，一天料都切不到（实测）。
     const 源 = 找源会话(文件夹) || sid
+    // 源会话叫什么（列会话里就有）—— 标题和提示词都用它，别用工人自己的名字
+    let 源名 = ''
+    try {
+      const 一 = 列会话(活会话们()).find((x) => x && String(x.id) === String(源))
+      源名 = 净会话名(一 && 一.名)
+    } catch (e) {}
     const 已 = 算进度(文件夹)
     // ⭐ 0.2.2：补星 = 只切「水位之后」的内容（同一天的后半段也算得出来）
     const 补 = Boolean(选项.补)
@@ -3301,7 +3415,9 @@ export function apply(ctx, 配置 = {}) {
     )
     let 提示词 = 造提示词({
       文件夹,
-      会话名: 项.名,
+      // ⭐ 0.3.2：名字要取**源会话**的，不是 项.名 —— 项.名 可能是上一批派出去的工人，
+      //   它的标题本身就是「拾星 · X · 日期」，再拼一层就变成「拾星 · 拾星 · …」。
+      会话名: 源名 || 项.名,
       已整理到: 已,
       天数: 料.天数,
       最早: 料.最早,
@@ -3378,7 +3494,9 @@ export function apply(ctx, 配置 = {}) {
 
     try {
       if (agent.session && 标题服务 && typeof 标题服务.rename === 'function') {
-        标题服务.rename(agent.session, '拾星 · ' + String(项.名 || 项.id).slice(0, 30) + ' · ' + 料.最早)
+        // ⭐ 0.3.2：兜底再剥一次前缀 —— 万一 项.名 本来就是工人（清单里的名字来自上一批），
+        //   也不会越叠越长。
+        标题服务.rename(agent.session, '拾星 · ' + 净会话名(源名 || 项.名 || 项.id).slice(0, 30) + ' · ' + 料.最早)
       }
     } catch {}
 
@@ -3610,38 +3728,20 @@ export function apply(ctx, 配置 = {}) {
       setTimeout(轮, 5000)
     }
     try {
-      // ① 先把规则/格式发过去
+      // ⭐ 0.3.2（issue #2）：以前是「先发提示词，再把料一条一条贴，最后再发一句开工」——
+      //   模型收到第一条就开始干活，之后每来一条料都重做一遍，最后再整套交一次。
+      //   现在合成**一条**消息：提示词 + 全部料 + 收尾那一句。
+      const 尾巴句 = 料块们.length
+        ? '料就是上面这些（' + 料.最早 + (料.最晚 && 料.最晚 !== 料.最早 ? ' ~ ' + 料.最晚 : '') + '）。'
+          + '从现在开始，按约定的格式交：每天的日记 + 记忆卡条目。没有别的文件要你读。'
+        : ''
+      const 全文 = [提示词].concat(料块们).concat(尾巴句 ? [尾巴句] : []).join(String.fromCharCode(10, 10))
       await agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text: 提示词 }],
+        content: [{ type: 'text', text: 全文 }],
         source: { kind: 'plugin:xingxi-pick' },
       })
-      // ② 再把料一条一条贴过去（不依赖子会话有没有文件工具）
-      for (const 块 of 料块们) {
-        await agent.followup({
-          id: randomUUID(),
-          role: 'user',
-          content: [{ type: 'text', text: 块 }],
-          source: { kind: 'plugin:xingxi-pick' },
-        })
-      }
-      // ③ 最后一句开工
-      if (料块们.length) {
-        await agent.followup({
-          id: randomUUID(),
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text:
-                '料就是上面这些（' + 料.最早 + (料.最晚 && 料.最晚 !== 料.最早 ? ' ~ ' + 料.最晚 : '') + '）。' +
-                '从现在开始，按约定的格式交：每天的日记 + 记忆卡条目。没有别的文件要你读。',
-            },
-          ],
-          source: { kind: 'plugin:xingxi-pick' },
-        })
-      }
       料发完 = true
       setTimeout(轮, 3000)
     } catch (e) {
@@ -3755,12 +3855,9 @@ export function apply(ctx, 配置 = {}) {
     }
   }
 
-  // 🛑 0.3.1：**不再自动派**。
-  //   她说的：「你不点按钮为什么要给人拾星」。
-  //   以前的调度器每 60 秒扫一遍所有文件夹，只要 .拾星/任务.json 还在（完成=false、暂停=false）
-  //   就自动派一批 —— 她根本没点按钮，侧边栏却一直冒「拾星 · …」的会话。
-  //   现在只有她亲手点「拾星 / 补星」才会派；任务跑完就停在那儿。
-  //   （定时写日记是另一条路，不受影响。）
+  // ⭐ 自动续派是**开着的**（0.3.1 起就一直是开着的，下面这个 true 不是忘改）。
+  //   以前那行注释写着「不再自动派」，跟代码对不上，按代码的实际行为算。
+  //   现在有刹车：刚派过的要过节流、连续三次没进展就停、停下要人点「继续」才再派。
   const 自动拾星 = true
   if (自动拾星) try {
     // ⭐ 只留一个调度器（2026-11-04 实测：一天里插件重载了 63 次，等于挂了 63 个定时器，
