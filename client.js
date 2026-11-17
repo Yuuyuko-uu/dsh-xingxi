@@ -1419,6 +1419,25 @@ window.__ModuleLoader__.load({
           if (j && j.定时) 设定({ ...j.定时, 会话: 新设.会话 })
         } catch (e) {}
       }
+      // ⭐ 0.3.8：时间输入框攒一下再发。
+      //   `type=time` 每改一段就会触发一次 change —— 输入 23:00 的过程中
+      //   会依次落成 02:30 → 23:30 → 23:00 三次保存，每次都走一遍「改过，今天可重跑」。
+      //   现在：停手 700 毫秒才发；离开输入框或按回车立刻发。
+      const 时间timer = useRef(null)
+      const 待发 = useRef(null)
+      const 收尾次发 = () => {
+        if (时间timer.current) { clearTimeout(时间timer.current); 时间timer.current = null }
+        const 值 = 待发.current
+        待发.current = null
+        if (值) 存定(值)
+      }
+      const 稍后存 = (改) => {
+        设定({ ...(定设 || {}), ...改, 会话: (会话 && 会话.id) || '' })
+        待发.current = 改
+        if (时间timer.current) clearTimeout(时间timer.current)
+        时间timer.current = setTimeout(() => { 时间timer.current = null; 收尾次发() }, 700)
+      }
+      useEffect(() => () => { if (时间timer.current) clearTimeout(时间timer.current) }, [])
       const 时串 = 定设 ? String(定设.时).padStart(2, '0') + ':' + String(定设.分).padStart(2, '0') : ''
       const 开关 = (开着, 点) =>
         h('button', {
@@ -1453,8 +1472,11 @@ window.__ModuleLoader__.load({
               const v = String(e.target.value || '')
               if (!v) return
               const [a, b] = v.split(':')
-              存定({ 时: Number(a), 分: Number(b) })
+              稍后存({ 时: Number(a), 分: Number(b) })
             },
+            // 离开输入框、或者按回车，就把攒着的那次立刻发出去
+            onBlur: 收尾次发,
+            onKeyDown: (e) => { if (e.key === 'Enter') 收尾次发() },
             style: { ...下拉, colorScheme: 'dark', width: 96 },
           })),
         // ⚠ 第一行不要上边框（行式自带一条，会跟上面的「几点」之间多出一条线）
