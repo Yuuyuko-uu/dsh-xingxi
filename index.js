@@ -434,21 +434,40 @@ function 裸会话id(名) {
  * ⚠ 以前只认第一种：直接摊在 `sessions` 底下的会话一条都扫不到，
  *   于是「未分组」那一栏永远空着（手机上尤其明显）。
  */
+/**
+ * ⭐ 0.3.9（2026-11-18，群友报的）：会话一多，切会话卡十几秒、主进程单核 100%、读盘 0（纯 CPU）。
+ *   原因：`找会话日志` 每调一次就重新扫一遍整个会话目录（readdir + 每个子目录一次 existsSync），
+ *   而外层是逐会话循环 —— 代价是会话数的平方。259 间会话时，30 秒 V8 profile 里 42% 落在 existsSync。
+ *   现在：目录列表 1.5 秒 TTL 缓存 + 一张「会话 id → 日志路径」的表，命中就完全不碰盘。
+ *   ⚠ TTL 不是 0：会话可能在缓存之后才建出来，1.5 秒后自然能看到；也不做「找不到就强制重扫」，
+ *     那会让未命中又变回逐次全盘扫描（正是要修的那个平方）。
+ */
+const 目录缓存 = { 时: 0, 表: null, 路: null }
+const 目录缓存时长 = 1500
+
 function 列会话目录() {
+  const 现在 = Date.now()
+  if (目录缓存.表 && 现在 - 目录缓存.时 < 目录缓存时长) return 目录缓存.表
   const 出 = []
   let 顶们 = []
   try {
     顶们 = readdirSync(会话根, { withFileTypes: true }).filter((d) => d.isDirectory())
   } catch {
+    目录缓存.时 = 现在
+    目录缓存.表 = 出
+    目录缓存.路 = new Map()
     return 出
   }
+  const 路 = new Map()
   for (const d of 顶们) {
     const 名 = String(d.name || '')
     if (!名) continue
     // 工作区目录统一是 `--<编码后的 cwd>--`；不是这个形状的，本身就是会话目录（裸 uuid）
     if (!名.startsWith('--')) {
-      if (!existsSync(join(会话根, 名, 'session.v4.jsonl.zstd'))) continue
+      const p = join(会话根, 名, 'session.v4.jsonl.zstd')
+      if (!existsSync(p)) continue
       出.push({ id: 名, 工作区目录: '', 目录: join(会话根, 名) })
+      路.set(裸会话id(名), p)
       continue
     }
     let 子们 = []
@@ -460,25 +479,30 @@ function 列会话目录() {
     for (const s of 子们) {
       const 子名 = String(s.name || '')
       // ⚠ 以前只认 `session-` 开头 —— 插件建的会话（裸 uuid）全被这一行干掉了
-      if (!existsSync(join(会话根, 名, 子名, 'session.v4.jsonl.zstd'))) continue
+      const p = join(会话根, 名, 子名, 'session.v4.jsonl.zstd')
+      if (!existsSync(p)) continue
       出.push({ id: 子名, 工作区目录: 名, 目录: join(会话根, 名, 子名) })
+      路.set(裸会话id(子名), p)
     }
   }
+  目录缓存.时 = 现在
+  目录缓存.表 = 出
+  目录缓存.路 = 路
   return 出
 }
 
-/** 找这个会话 id 的日志文件（在哪个工作区目录下不确定，得扫） */
+/** 找这个会话 id 的日志文件（在哪 个目录下不确定，但**不再每次扫盘**） */
 export function 找会话日志(会话id) {
   if (!会话id) return ''
   const 目标 = 裸会话id(会话id)
-  for (const x of 列会话目录()) {
-    if (裸会话id(x.id) !== 目标) continue
-    const p = join(x.目录, 'session.v4.jsonl.zstd')
-    try {
-      if (statSync(p).isFile()) return p
-    } catch {}
+  列会话目录()   // 用缓存；过期了这一次会重建
+  const p = 目录缓存.路 && 目录缓存.路.get(目标)
+  if (!p) return ''
+  try {
+    return statSync(p).isFile() ? p : ''
+  } catch {
+    return ''
   }
-  return ''
 }
 
 const 帧魔数 = [0x28, 0xb5, 0x2f, 0xfd]
@@ -1857,7 +1881,22 @@ function 读会话头(路径) {
   let 值 = { 标题: '', cwd: '', createdAt: 0, 深度: 0, 机器: false }
   let 见过机器话 = false   // 看到过不是人说的东西（插件递的话、注入的上下文）
   try {
-    const 缓 = readFileSync(路径).subarray(0, 4194304)
+    // ⭐ 0.3.9：以前是 `readFileSync(路径).subarray(0, 4MB)` —— 整份读进来只留前 4MB。
+    //   一个几百 MB 的会话日志，为了看个标题把整份读一遍。现在只读开头那 4MB。
+    const 要 = Math.min(statSync(路径).size, 4194304)
+    let 缓 = Buffer.alloc(要)
+    const fd = openSync(路径, 'r')
+    try {
+      let 读 = 0
+      while (读 < 要) {
+        const n = readSync(fd, 缓, 读, 要 - 读, 读)
+        if (!n) break
+        读 += n
+      }
+      if (读 < 要) 缓 = 缓.subarray(0, 读)
+    } finally {
+      closeSync(fd)
+    }
     const 帧们 = []
     for (let i = 0; i + 4 <= 缓.length; i++) {
       if (缓[i] === 0x28 && 缓[i + 1] === 0xb5 && 缓[i + 2] === 0x2f && 缓[i + 3] === 0xfd) 帧们.push(i)
