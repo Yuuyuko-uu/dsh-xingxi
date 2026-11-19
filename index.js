@@ -3194,10 +3194,20 @@ export function apply(ctx, 配置 = {}) {
             const sid = 取会话id(exec)
             if (!sid) return { ok: false, text: '拿不到当前会话的 id，所以不知道该读哪一份档案。请先重载一次星汐；还这样的话，把这条原话告诉作者。' }
             const 档 = 所有档案(sid)
-            const 限 = Math.max(600, Math.min(20000, Number((args && args.最多字) || 4000)))
-            const 词 = String((args && args.关键词) || '').trim()
-            const 日 = String((args && args.日期) || '').trim()
-            const 名 = String((args && args.文件) || '').trim()
+            // ⚠ 参数名认中英文两套。schema 里写的是中文键（关键词 / 日期 / 文件），
+            //   但模型常常自己把它们翻成 keyword / date / file 递上来 ——
+            //   只认中文就会「参数明明传了，却当没传」，于是永远只回一份索引，什么都查不到。
+            const 取 = (...名们) => {
+              for (const 键 of 名们) {
+                const v = args && args[键]
+                if (v !== undefined && v !== null && v !== '') return v
+              }
+              return ''
+            }
+            const 限 = Math.max(600, Math.min(20000, Number(取('最多字', 'limit', 'maxChars') || 4000)))
+            const 词 = String(取('关键词', 'keyword', 'q', 'query')).trim()
+            const 日 = String(取('日期', 'date', 'day')).trim()
+            const 名 = String(取('文件', 'file', 'name', 'filename')).trim()
 
             if (!档.length) {
               const 夹 = 会话文件夹(sid)
