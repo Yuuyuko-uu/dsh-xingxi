@@ -1891,7 +1891,7 @@ window.__ModuleLoader__.load({
                   },
                 })
               : null,
-            选中星 ? h(详情卡, { 星: 选中星, 关: () => 设选中(null) }) : null,
+            选中星 ? h(详情卡, { 星: 选中星, 关: () => 设选中(null), 会话: 当前 || (现在会话 && 现在会话.id) || '', 刷新: () => 拉图(当前) }) : null,
           ),
           // 右侧会话栏
           h('div', { style: 会话栏 },
@@ -1954,11 +1954,11 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function 详情卡({ 星, 关 }) {
+    function 详情卡({ 星, 关, 会话, 刷新 }) {
       // ⚠ 点某颗星直接崩掉整页的教训：详情卡里任何一个字段是 undefined 都会把渲染炸掉，
       //   炸了以后整个星汐都打不开。这里整块兜住，出错就显示一句，不让它带崩插件。
       try {
-        return 详情卡内容({ 星, 关 })
+        return 详情卡内容({ 星, 关, 会话, 刷新 })
       } catch (e) {
         return h('div', { style: 详情 },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -1969,24 +1969,145 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function 详情卡内容({ 星, 关 }) {
+    function 详情卡内容({ 星, 关, 会话, 刷新 }) {
       const 名 = String((星 && (星.title || 星.name || 星.ref)) || '（没有名字）')
       const 色 = 星色(星) || '#b9c6e8'
+      // ⭐ 0.4.3：星图里直接改 / 删这一颗。
+      //   日记只给改不给删（删了就是凭空少一天）；记忆卡可以删。
+      const 是日记 = (星 && 星.kind) === 'diary'
+      const [改着, 设改着] = useState(false)
+      const [草稿, 设草稿] = useState(String((星 && 星.text) || ''))
+      const [忙, 设忙] = useState(false)
+      const [错, 设错] = useState('')
+      // ⚠ 宿主没重启时，新接口还没挂上 —— 服务端回的是**纯文本**「没有这个路由」，
+      //   直接 r.json() 会抛 `Unexpected token '没', "没有这个路" is not valid JSON`。
+      //   这里兜一下，说人话。
+      const 读回JSON = async (r) => {
+        const 文 = await r.text()
+        try {
+          return JSON.parse(文)
+        } catch {
+          return {
+            ok: false,
+            原因: r.status === 404
+              ? '宿主还是旧版本（新接口没挂上）—— 重启一次 DSH 再来。'
+              : '返回的不是 JSON：' + String(文 || '').slice(0, 80),
+          }
+        }
+      }
+      const 存 = async () => {
+        if (忙) return
+        设忙(true)
+        设错('')
+        try {
+          const r = await fetch('/dsh-xingxi/星/改', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              sid: 会话 || '',
+              文件: (星 && 星.出) || '',
+              doc: 星.doc || '',
+              kind: 星.kind || '',
+              date: 星.date || '',
+              星文: String(星.text || ''),
+              新文: 草稿,
+            }),
+          })
+          const j = await 读回JSON(r)
+          if (!j || !j.ok) {
+            设错(String((j && j.原因) || '没改成'))
+            return
+          }
+          设改着(false)
+          try {
+            刷新 && 刷新()
+          } catch {}
+          关 && 关()
+        } catch (e) {
+          设错(String((e && e.message) || e))
+        } finally {
+          设忙(false)
+        }
+      }
+      const 删 = async () => {
+        if (忙) return
+        const 看 = String((星 && 星.text) || '').trim().slice(0, 160)
+        if (!window.confirm('从记忆卡里删掉这一条？\n\n' + 看 + '\n\n（会先备份原文件，能回滚）')) return
+        设忙(true)
+        设错('')
+        try {
+          const r = await fetch('/dsh-xingxi/星/删', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sid: 会话 || '', 文件: (星 && 星.出) || '', doc: 星.doc || '', kind: 星.kind || '', 星文: String(星.text || '') }),
+          })
+          const j = await 读回JSON(r)
+          if (!j || !j.ok) {
+            设错(String((j && j.原因) || '没删成'))
+            return
+          }
+          try {
+            刷新 && 刷新()
+          } catch {}
+          关 && 关()
+        } catch (e) {
+          设错(String((e && e.message) || e))
+        } finally {
+          设忙(false)
+        }
+      }
       return h('div', { style: { ...详情, borderColor: 透明(色, 0.24), boxShadow: `0 18px 50px rgba(0,0,0,0.5), 0 0 30px ${透明(色, 0.08)}` } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 9, marginBottom: 10 } },
           h('i', { style: { width: 9, height: 9, borderRadius: 99, background: 色, flex: 'none', boxShadow: `0 0 12px ${透明(色, 0.58)}` } }),
           h('span', { style: { fontSize: 14, fontWeight: 600, letterSpacing: 0.1, flex: 1, lineHeight: 1.5 } }, 名),
           h('button', { style: { ...小按钮, padding: '2px 8px', borderRadius: 7, color: 'rgba(222,234,255,0.75)' }, onClick: 关 }, '×')),
-        h('div', { style: { fontSize: 10.5, letterSpacing: 0.25, color: 透明(色, 0.85), marginBottom: 10, paddingLeft: 18 } },
+        h('div', { style: { fontSize: 10.5, letterSpacing: 0.25, color: 透明(色, 0.85), marginBottom: 8, paddingLeft: 18 } },
           星.kind === 'card'
             ? (星.chapter ? '记忆 · ' + (星.chapterName || 章名表[星.chapter] || '') : '记忆' + (星.chapterName ? ' · ' + 星.chapterName : ''))
             : '日记 · ' + 星.date),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 9, paddingLeft: 18 } },
+          h('button', {
+            style: { ...小按钮, padding: '3px 9px', fontSize: 10.5 },
+            onClick: () => {
+              设错('')
+              设草稿(String((星 && 星.text) || ''))
+              设改着(!改着)
+            },
+          }, 改着 ? '取消' : '改这段'),
+          是日记
+            ? null
+            : h('button', {
+                style: { ...小按钮, padding: '3px 9px', fontSize: 10.5, color: 'rgba(238,168,168,0.9)' },
+                onClick: 删,
+              }, '删这条'),
+          h('span', { style: { flex: 1 } }),
+          改着
+            ? h('button', {
+                style: { ...小按钮, padding: '3px 10px', fontSize: 10.5, color: 'rgba(170,226,190,0.95)' },
+                onClick: 存,
+              }, 忙 ? '存着…' : '存回去')
+            : null),
+        错
+          ? h('div', { style: { fontSize: 10.5, color: 'rgba(240,150,150,0.92)', marginBottom: 8, paddingLeft: 18, lineHeight: 1.7 } }, 错)
+          : null,
         星.小标题们 && 星.小标题们.length
           ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 8 } },
               星.小标题们.map((t, i) => h('span', { key: i, style: 小标签 }, t)))
           : null,
-        h('div', { style: { flex: 1, overflowY: 'auto', fontSize: 12.5, lineHeight: 1.85, opacity: 0.88, paddingRight: 4 } },
-          正文段落(星.text).map((p, i) => h('p', { key: i, style: { margin: '0 0 10px' } }, p))),
+        改着
+          ? h('textarea', {
+              value: 草稿,
+              onChange: (e) => 设草稿(e.target.value),
+              spellCheck: false,
+              style: {
+                flex: 1, minHeight: 180, resize: 'none', outline: 'none',
+                fontFamily: 'inherit', fontSize: 12.5, lineHeight: 1.8,
+                color: '#e6eeff', background: 'rgba(8,13,24,0.72)',
+                border: '1px solid rgba(157,185,240,0.18)', borderRadius: 9, padding: '10px 12px',
+              },
+            })
+          : h('div', { style: { flex: 1, overflowY: 'auto', fontSize: 12.5, lineHeight: 1.85, opacity: 0.88, paddingRight: 4 } },
+              正文段落(星.text).map((p, i) => h('p', { key: i, style: { margin: '0 0 10px' } }, p))),
       )
     }
 

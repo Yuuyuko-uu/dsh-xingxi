@@ -13,6 +13,9 @@
 // ⚠ 遗忘/衰减**不在这里做**。
 
 import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, rmSync, openSync, readSync, closeSync, copyFileSync, renameSync } from "node:fs"
+// ⭐ 0.4.3：星图里「改 / 删」一颗星 —— 纯函数放在 lib 里，能单独测，也不容易碰坏宿主。
+import { 改日记, 改条目, 删条目, 改整篇, 是整篇日记 } from './lib/星的操作.mjs'
+import { 定位档案文件, 文件在档案里 } from './lib/星的文件.mjs'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -172,6 +175,15 @@ function 解析日记体(文, 基, 文件日期) {
     }
   }
   return [...按天.values()].sort((a, b) => (a.date < b.date ? -1 : 1))
+}
+
+// ⭐ 0.4.3：星图读的是哪个文件，就把那个**绝对路径**挂在星上（出）。
+//   这样界面改的时候直接把路径递回来，不用再靠 doc 猜文件名（猜错过一次，很严重）。
+//   只给本机界面用，不出网络。
+function 解析并记路(路径, 相对名) {
+  const 星们 = 解析一个文件(路径, 相对名)
+  for (const s of 星们) s.出 = 路径
+  return 星们
 }
 
 export function 解析一个文件(路径, 相对名) {
@@ -380,7 +392,7 @@ export function 扫档案文件夹(目录) {
       }
       else if (d.isFile() && extname(d.name).toLowerCase() === '.md') {
         文件数++
-        星.push(...解析一个文件(路径, (前缀 ? 前缀 + '/' : '') + basename(d.name, '.md')))
+        星.push(...解析并记路(路径, (前缀 ? 前缀 + '/' : '') + basename(d.name, '.md')))
       }
     }
     void 排序
@@ -395,7 +407,7 @@ export function 扫档案文件夹(目录) {
         if (!d.isFile() || extname(d.name).toLowerCase() !== '.md') continue
         文件数++
         const 前缀2 = (前缀 ? 前缀 + '/' : '') + z.名
-        星.push(...解析一个文件(join(z.目录, d.name), 前缀2 + '/' + basename(d.name, '.md')))
+        星.push(...解析并记路(join(z.目录, d.name), 前缀2 + '/' + basename(d.name, '.md')))
       }
     }
   }
@@ -1046,6 +1058,8 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
     '',
     '**一天写三到六处，最多六处。** 挑不满就少写，绝不为了写满去凑；',
     '到六处还压不下来，说明你在录流水，不是在挑 —— 回去砍，砍掉的不叫遗漏，叫判断。',
+    '**交之前自己数一遍**：这一段里写了几处？超过六处，把最不值得的砍掉再交，别直接交上来。',
+    '干活的过程（改了什么、跑了多少、报了多少字）只当背景，压成半句或者干脆不写 —— 那多半不是「过一个月还值得讲」的事。',
     '',
     '**挑的标准只有一条**：过一个月再翻回来，这件事还值得再讲一遍吗？值得的才写。',
     '',
@@ -1065,6 +1079,8 @@ export function 造提示词({ 文件夹, 会话名, 已整理到, 天数, 最�
     '1. **不猜动机** —— 为什么这么做、是不是装的、图什么，看不见就不写；拿不准写「不知道」。',
     '   动机记错比事实记错更麻烦：事实错了能对照原话改；动机错了，下一个读到的会以为自己真是那种人。',
     '2. **不编** —— 料里没有的不许补。补出来的那个，下一个读到的人会当成真的。',
+    '   **别替叙事补圆**：被拒绝的、没发生的事，不能因为后面气氛又变了，就写成「后来还是到了」。',
+    '   发生到哪儿就写到哪儿；没发生，就写「那天停在这里」。宁可让一段停在半截，也不许替它把结局推出来。',
     '3. **不替他把不好的事抹掉** —— 做得不好的、说重话的、吵起来的，一样写，而且要写清楚。',
     '   区别只在写法：✅「她说了『你别再这样』。」「那句话说完，两边都停了很久。」',
     '   ❌「他又犯了老毛病。」「她心里肯定很难受。」前一种是事，后一种是判决。',
@@ -2273,13 +2289,25 @@ const 缓存 = new Map()
 // 星图缓存的有效期（毫秒）。太短＝每次切会话都重算；太长＝改完档案看不到变化
 const 缓存毫秒 = 8000
 
-function 文件签名们(目录) {
+function 文件签名们(目录, 深 = 0) {
   let 串 = ''
   try {
     for (const f of readdirSync(目录).sort()) {
+      const 全 = join(目录, f)
+      let 是夹 = false
+      try {
+        是夹 = statSync(全).isDirectory()
+      } catch {}
+      // ⭐ 0.4.3：**进子目录**。以前只看这一层的 .md ——
+      //   可档案一般是 `日记/2026-11-19.md` 这种，改了子目录里的文件签名不变，
+      //   界面就「看起来没刷新」。
+      if (是夹) {
+        if (深 < 3 && !f.startsWith('.')) 串 += 文件签名们(全, 深 + 1)
+        continue
+      }
       if (!f.toLowerCase().endsWith('.md')) continue
       try {
-        const s = statSync(join(目录, f))
+        const s = statSync(全)
         串 += f + ':' + s.mtimeMs + ':' + s.size + ';'
       } catch {}
     }
@@ -2332,6 +2360,27 @@ export function 造共享桥(星们, 上限 = 400) {
   return 桥
 }
 
+// ⭐ 0.4.3：本机那份的缓存签名。
+//   ⚠ 以前只看 statSync(p).size —— 日记是**文件夹**时，那算的是目录本身的大小，
+//     在里面改一篇日记文件，目录 size 不变 → 缓存命中 → 界面看起来「没刷新」。
+//     现在：记忆卡看 mtime+size；日记是文件夹就按文件逐个签（名字+mtime+size）。
+function 本机签名(存的) {
+  let 签 = ''
+  try {
+    if (存的.记忆卡) {
+      const s = statSync(存的.记忆卡)
+      签 += 'k:' + s.mtimeMs + ':' + s.size + ';'
+    }
+  } catch {}
+  try {
+    if (存的.日记) {
+      const s = statSync(存的.日记)
+      签 += s.isDirectory() ? 'd:' + 文件签名们(存的.日记) : 'f:' + s.mtimeMs + ':' + s.size + ';'
+    }
+  } catch {}
+  return 签
+}
+
 export function 出图(会话id, 活们 = []) {
   const 存的 = 读存配置()
   // ⭐ 0.2.2：**先算签名、先查缓存**。
@@ -2340,14 +2389,7 @@ export function 出图(会话id, 活们 = []) {
   let 快键 = ''
   try {
     if (会话id === '__本机__') {
-      let 字节 = 0
-      for (const p of [存的.记忆卡, 存的.日记]) {
-        if (!p) continue
-        try {
-          字节 += statSync(p).size
-        } catch (e) {}
-      }
-      快键 = '__本机__|' + (存的.记忆卡 || '') + '|' + (存的.日记 || '') + '|' + 字节
+      快键 = '__本机__|' + (存的.记忆卡 || '') + '|' + (存的.日记 || '') + '|' + 本机签名(存的)
     } else if (会话id) {
       const 夹 = String((存的.绑定 || {})[会话id] || join(档案根, 会话id))
       快键 = String(会话id) + '|' + 文件签名们(夹)
@@ -2370,20 +2412,12 @@ export function 出图(会话id, 活们 = []) {
   let 中心 = ''
   if ((这项 && (这项.本机 || 这项.id === '__本机__')) || 当本机) {
     中心 = 这项 && 这项.本机 && 这项.id !== '__本机__' ? 这项.名 : 存的.中心 || (这项 && 这项.名) || '本机档案'
-    键 = '__本机__' + '|' + (存的.记忆卡 || '') + '|' + (存的.日记 || '')
-    let 字节 = 0
-    for (const p of [存的.记忆卡, 存的.日记]) {
-      if (!p) continue
-      try {
-        字节 += statSync(p).size
-      } catch {}
-    }
-    键 += '|' + 字节
+    键 = '__本机__' + '|' + (存的.记忆卡 || '') + '|' + (存的.日记 || '') + '|' + 本机签名(存的)
     const 星 = []
     let 文件数 = 0
     // 记忆卡：一本（八章按 ### 拆成星）
     if (存的.记忆卡 && existsSync(存的.记忆卡)) {
-      星.push(...解析一个文件(存的.记忆卡, '记忆卡'))
+      星.push(...解析并记路(存的.记忆卡, '记忆卡'))
       文件数++
     }
     // 日记：**可能是一个文件夹**（一天一个文件），也可能还是老的单文件
@@ -2399,12 +2433,12 @@ export function 出图(会话id, 活们 = []) {
         } catch {}
         for (const f of 们) {
           try {
-            星.push(...解析一个文件(join(存的.日记, f), basename(f, '.md')))
+            星.push(...解析并记路(join(存的.日记, f), basename(f, '.md')))
             文件数++
           } catch {}
         }
       } else {
-        星.push(...解析一个文件(存的.日记, '日记'))
+        星.push(...解析并记路(存的.日记, '日记'))
         文件数++
       }
     }
@@ -3169,10 +3203,13 @@ export function apply(ctx, 配置 = {}) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            关键词: { type: 'string', description: '要搜的词，比如「卖号」「第一次」' },
-            日期: { type: 'string', description: 'YYYY-MM-DD，查日记用（也认 11-03 这种）' },
-            文件: { type: 'string', description: '文件名或它的一部分' },
-            最多字: { type: 'number', description: '最多返回多少字，默认 4000' },
+            // ⚠ 参数名只能用英文：Anthropic（Claude）要求 `^[a-zA-Z0-9_.-]{1,64}$`，
+            //   中文键名会被直接 400（跟 dsh-fish-memory #46 同一个坑）。
+            //   中文说明留在 description 里；execute 那边中英文两套都认，老会话照样能用。
+            keyword: { type: 'string', description: '要搜的词（关键词），比如「卖号」「第一次」' },
+            date: { type: 'string', description: '日期 YYYY-MM-DD，查日记用（也认 11-03 这种）' },
+            file: { type: 'string', description: '文件名或它的一部分' },
+            limit: { type: 'number', description: '最多返回多少字，默认 4000' },
           },
         },
         output: {
@@ -4202,6 +4239,79 @@ export function apply(ctx, 配置 = {}) {
           if (径 === '/dsh-xingxi/graph') {
             const sid = 地址.searchParams.get('sid') || ''
             return 回JSON(res, 出图(sid, 活会话们()))
+          }
+          // ⭐ 0.4.3：星图里改 / 删一颗星。
+          //   ⚠ 只动「匹配到的那几行」，改前先备份，写前先在纯函数里核对唯一性 ——
+          //     定位不唯一就不动（宁可报错，绝不猜）。
+          //   ⚠ 日记**只给改不给删**：删了就是凭空少一天，那不行。
+          if ((径 === '/dsh-xingxi/星/改' || 径 === '/dsh-xingxi/星/删') && req.method === 'POST') {
+            const 要删 = 径.endsWith('/删')
+            let 体 = ''
+            for await (const 块 of req) 体 += 块
+            let 入 = {}
+            try {
+              入 = JSON.parse(体 || '{}') || {}
+            } catch {
+              return 回JSON(res, { ok: false, 原因: '收不到内容' }, 400)
+            }
+            // ⚠ 界面那边一开始把**整个会话对象**递过来了（String(obj) = '[object Object]'），
+            //   于是永远匹配不上绑定表 —— 这里两种都收：字符串直接用，对象就取 .id。
+            const sid原样 = 入.sid
+            const sid = typeof sid原样 === 'string' ? sid原样 : String((sid原样 && sid原样.id) || '')
+            const doc = String(入.doc || '')
+            const kind = String(入.kind || '')
+            const 星文 = String(入.星文 || '')
+            const 新文 = String(入.新文 || '')
+            if (!doc) return 回JSON(res, { ok: false, 原因: '没说是哪个文件' }, 400)
+            if (要删 && (kind === 'diary' || /^\d{4}-\d{2}-\d{2}$/.test(doc))) {
+              return 回JSON(res, { ok: false, 原因: '日记只给改、不给删 —— 真要删请直接在文件里删' }, 400)
+            }
+            const 存的 = 读存配置()
+            // ⚠ 2026-11-21：**界面直接把星图来源的那个文件路径递回来**（星.出），
+            //   不再靠 doc 猜文件名 —— 猜错过一次，把别的档案里同名的那篇覆盖了。
+            //   这里只补一道安全检查：这个路径必须落在某个档案目录里。
+            let 文件 = ''
+            const 入路 = String(入.文件 || '').trim()
+            if (入路) {
+              if (!文件在档案里(存的, 档案根, 入路)) {
+                记一笔('星图：路径不在档案里 ' + 入路)
+                return 回JSON(res, { ok: false, 原因: '这个文件不在任何档案目录里，不动它' }, 400)
+              }
+              文件 = 入路
+            } else {
+              const 定 = 定位档案文件(存的, sid, doc, 档案根)
+              if (!定.ok) {
+                记一笔('星图：定位失败 doc=' + doc + ' sid=' + sid + ' —— ' + 定.原因)
+                const 是拒绝 = /不安全|同名|还没绑|还没有档案/.test(定.原因)
+                return 回JSON(res, { ok: false, 原因: 定.原因 }, 是拒绝 ? 400 : 404)
+              }
+              文件 = 定.文件
+            }
+            let 原 = ''
+            try {
+              原 = readFileSync(文件, 'utf8')
+            } catch (e) {
+              return 回JSON(res, { ok: false, 原因: '读不了这个文件' }, 500)
+            }
+            const 出 = 要删
+              ? 删条目(原, 星文)
+              : kind === 'diary'
+                ? 是整篇日记(原) || /^\d{4}-\d{2}-\d{2}$/.test(basename(文件, '.md'))
+                  ? 改整篇(原, 新文)
+                  : 改日记(原, String(入.date || doc || ''), 新文)
+                : 改条目(原, 星文, 新文)
+            if (!出.ok) return 回JSON(res, { ok: false, 原因: 出.原因 }, 400)
+            // 改前先备份（跟别处一样的 .bak-时间戳），出事能回滚
+            try {
+              copyFileSync(文件, 文件 + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23))
+            } catch (e) {}
+            try {
+              writeFileSync(文件, 出.全文, 'utf8')
+            } catch (e) {
+              return 回JSON(res, { ok: false, 原因: '写不进去：' + String((e && e.message) || e) }, 500)
+            }
+            记一笔('星图：' + (要删 ? '删' : '改') + '了一颗星（' + basename(文件) + '）')
+            return 回JSON(res, { ok: true, 删: 要删, 文件: basename(文件) })
           }
           if (径 === '/dsh-xingxi/料') {
             const sid = 地址.searchParams.get('sid') || ''
