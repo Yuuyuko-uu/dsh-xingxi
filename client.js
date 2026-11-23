@@ -1491,7 +1491,13 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...小字, paddingTop: 9 } },
           '让会话自己拾星：到点提醒这个会话，它自己写记忆卡和日记。',
           h('br'),
-          '让星汐拾星：星汐另开一个会话，把记忆卡和日记一起写。'),
+          '让星汐拾星：星汐另开一个会话，把记忆卡和日记一起写。',
+          h('br'),
+          '两条都守着同一条规矩：**当天已经有真日记的，只补记忆卡、不重写日记**（你自己写好的不会被盖掉）。',
+          h('br'),
+          '触发时间按你设的那一档算（默认 23:00），从「上次整理到」的下一天开始往后补；',
+          h('br'),
+          '万一当天拾早了（后半天的内容没进去），用下面那个「重拾某一天」重跑那一天就行。'),
       ])
 
 
@@ -1523,6 +1529,10 @@ window.__ModuleLoader__.load({
       const [跑, 设跑] = useState(null)
       const [补, 设补] = useState(null)
       const [补着, 设补着] = useState(false)
+      // ⭐ 0.4.5：重拾某一天
+      const [重拾日, 设重拾日] = useState('')
+      const [重拾着, 设重拾着] = useState(false)
+      const [重拾结果, 设重拾结果] = useState(null)
       // ⭐ 0.2.2 停止：把这一批掐掉，并且不让调度器再派
       const [停着, 设停着] = useState(false)
       const 停止 = async () => {
@@ -1541,7 +1551,33 @@ window.__ModuleLoader__.load({
         }
       }
       // ⭐ 0.2.2 补星：只给「已整理到的那一天」补水位之后的尾巴
-      const 开始补 = async () => {
+      // ⭐ 0.4.5（0.4.4 实测反馈 #2）：显式「重拾某一天」—— 不用再手改内部 json。
+  const 重拾 = async () => {
+    if (!会话 || !会话.id) return
+    const 日 = String(重拾日 || '').trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(日)) {
+      设重拾结果({ ok: false, 原因: '日期写成 2026-11-21 这种' })
+      return
+    }
+    设重拾着(true)
+    设重拾结果(null)
+    try {
+      const r = await fetch('/dsh-xingxi/重拾', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sid: 会话.id, 日 }),
+      })
+      const j = await r.json().catch(() => ({}))
+      设重拾结果(j.ok
+        ? { ok: true, 说: '已重派 ' + 日 + '（账本退到 ' + ((j.重拾 && j.重拾.前一天) || '前一天') + '）' }
+        : { ok: false, 原因: j.原因 || ('HTTP ' + r.status) })
+    } catch (e) {
+      设重拾结果({ ok: false, 原因: String((e && e.message) || e) })
+    } finally {
+      设重拾着(false)
+    }
+  }
+  const 开始补 = async () => {
         if (!会话 || !会话.id) return
         设补着(true)
         设补(null)
@@ -1640,6 +1676,35 @@ window.__ModuleLoader__.load({
               }, 停着 ? '停着…' : '停止'),
               h('span', { style: { fontSize: 11, opacity: 0.35, lineHeight: 1.6 } },
                 跑着 ? '在切料、开新会话' : 会话 && !会话.有 ? '还没有档案，拾完就有了' : '会新开一个会话，让它一天一天往下做')),
+            // ⭐ 0.4.5（0.4.4 实测反馈 #2）：重拾某一天 —— 当天拾早了（后半天的没进去）时用这个
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } },
+              h('span', { style: { fontSize: 11, opacity: 0.5, flex: 'none' } }, '重拾某一天'),
+              h('input', {
+                value: 重拾日,
+                placeholder: '2026-11-21',
+                spellCheck: false,
+                onChange: (e) => 设重拾日(e.target.value),
+                style: {
+                  width: 108, fontSize: 11.5, padding: '5px 8px', borderRadius: 7,
+                  background: 'rgba(8,13,24,0.6)', color: '#e0eaff',
+                  border: '1px solid rgba(157,185,240,0.18)', outline: 'none', fontFamily: 'inherit',
+                },
+              }),
+              h('button', {
+                onClick: 重拾,
+                disabled: 重拾着 || !(会话 && 会话.id),
+                style: {
+                  ...小按钮, padding: '5px 12px', fontSize: 11.5,
+                  ...(重拾着 || !(会话 && 会话.id) ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+                },
+              }, 重拾着 ? '重派中…' : '重拾'),
+              h('span', { style: { fontSize: 10.5, opacity: 0.32, lineHeight: 1.6 } },
+                '账本和料会自动退回去，不用手改 json'),
+            ),
+            重拾结果
+              ? h('div', { style: { marginTop: 8, fontSize: 11.5, lineHeight: 1.8, color: 重拾结果.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
+                  重拾结果.ok ? 重拾结果.说 : String(重拾结果.原因 || '没重拾成'))
+              : null,
             补
               ? h('div', { style: { marginTop: 10, fontSize: 11.5, lineHeight: 1.8, color: 补.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
                   补.ok
