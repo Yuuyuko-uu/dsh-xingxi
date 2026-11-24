@@ -1537,6 +1537,66 @@ window.__ModuleLoader__.load({
       const [合并源, 设合并源] = useState('')
       const [合并着, 设合并着] = useState(false)
       const [合并结果, 设合并结果] = useState(null)
+      // ⭐ 0.4.6：一次做几天（1~7），存宿主那边
+      const [批天数, 设批天数] = useState(2)
+      useEffect(() => {
+        let 活 = true
+        fetch('/dsh-xingxi/批天数')
+          .then((r) => r.json())
+          .then((j) => { if (活 && j && j.ok) 设批天数(Number(j.批天数) || 2) })
+          .catch(() => {})
+        return () => { 活 = false }
+      }, [])
+      const 改批天数 = async (n) => {
+        const 旧 = 批天数
+        设批天数(n)
+        try {
+          const r = await fetch('/dsh-xingxi/批天数', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ 天数: n }),
+          })
+          const j = await r.json().catch(() => ({}))
+          if (!j.ok) 设批天数(旧)
+        } catch (e) {
+          设批天数(旧)
+        }
+      }
+      // 合并任务落盘在宿主那边，面板关掉再进来也能看到（实测反馈：一退出就没了）
+      const [合并记录, 设合并记录] = useState([])
+      const [取消着, 设取消着] = useState('')
+      const 拉合并状态 = async () => {
+        try {
+          const r = await fetch('/dsh-xingxi/合并状态')
+          const j = await r.json().catch(() => ({}))
+          if (j && j.ok) 设合并记录(Array.isArray(j.记录们) ? j.记录们 : [])
+        } catch (e) {}
+      }
+      useEffect(() => { 拉合并状态() }, [])
+      // ⭐ 0.4.6：取消一个合并（跟拾星「停止」一个意思：先停会话，再删记录）
+      const 取消合并 = async (目标) => {
+        const 目 = String(目标 || '')
+        if (!目 || 取消着) return
+        设取消着(目)
+        try {
+          const r = await fetch('/dsh-xingxi/合并取消', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ 目标: 目 }),
+          })
+          const j = await r.json().catch(() => ({}))
+          设合并结果(
+            j.ok
+              ? { ok: true, 说: String(j.说明 || '取消了') }
+              : { ok: false, 原因: String(j.原因 || ('HTTP ' + r.status)) },
+          )
+          await 拉合并状态()
+        } catch (e) {
+          设合并结果({ ok: false, 原因: String((e && e.message) || e) })
+        } finally {
+          设取消着('')
+        }
+      }
       // ⭐ 0.2.2 停止：把这一批掐掉，并且不让调度器再派
       const [停着, 设停着] = useState(false)
       const 停止 = async () => {
@@ -1607,17 +1667,19 @@ window.__ModuleLoader__.load({
       })
       const j = await r.json().catch(() => ({}))
       if (!j.ok) {
-        设合并结果({ ok: false, 原因: j.原因 || ('HTTP ' + r.status) })
+        // 「取不到模型」时插件那一半已经做完了，要说清楚做了什么、还差什么
+        设合并结果({ ok: false, 原因: j.说明 || j.原因 || ('HTTP ' + r.status) })
       } else {
         const m = j.合并 || {}
         设合并结果({
           ok: true,
           说:
             '合到 ' + (m.目标 || '新文件夹') +
-            '：抄了 ' + (m.抄了 || 0) + ' 天日记、' + (m.原文天数 || 0) + ' 天原文' +
-            (m.派了 ? '；多份的日记（' + (m.要合日记 || 0) + ' 天）和记忆卡交给一个会话在合，过几分钟去看' : '；没有需要 AI 合的部分'),
+            '：抄了 ' + (m.抄了 || 0) + ' 天日记、' + (m.原文天数 || 0) + ' 天原文。' +
+            (j.说明 || ''),
         })
       }
+      拉合并状态()
     } catch (e) {
       设合并结果({ ok: false, 原因: String((e && e.message) || e) })
     } finally {
@@ -1723,6 +1785,21 @@ window.__ModuleLoader__.load({
               }, 停着 ? '停着…' : '停止'),
               h('span', { style: { fontSize: 11, opacity: 0.35, lineHeight: 1.6 } },
                 跑着 ? '在切料、开新会话' : 会话 && !会话.有 ? '还没有档案，拾完就有了' : '会新开一个会话，让它一天一天往下做')),
+            // ⭐ 0.4.6：一次做几天（1~7）—— 天数越多开的会话越少，但太多了它会漏着写
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } },
+              h('span', { style: { fontSize: 11, opacity: 0.5, flex: 'none' } }, '一次做几天'),
+              h('select', {
+                value: 批天数,
+                onChange: (e) => 改批天数(Number(e.target.value)),
+                style: {
+                  fontSize: 11.5, padding: '5px 8px', borderRadius: 7,
+                  background: 'rgba(8,13,24,0.6)', color: '#e0eaff',
+                  border: '1px solid rgba(157,185,240,0.18)', outline: 'none', fontFamily: 'inherit',
+                },
+              }, [1, 2, 3, 4, 5, 6, 7].map((n) => h('option', { key: n, value: n }, n + ' 天'))),
+              h('span', { style: { fontSize: 10.5, opacity: 0.32, lineHeight: 1.6, flex: 1 } },
+                批天数 >= 6 ? '越多越省会话，但超过 5 天它容易挑着写、漏掉几天' : '一天一个会话开得太多了；天数越多，开的会话越少'),
+            ),
             // ⭐ 0.4.6：从「重拾某一天」扩成「重拾一段」——
             //   先拾了新会话、水位推到最新之后，旧的窗口就永远补不进来（老大实报）。
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } },
@@ -1779,6 +1856,38 @@ window.__ModuleLoader__.load({
             合并结果
               ? h('div', { style: { marginTop: 6, fontSize: 11.5, lineHeight: 1.8, color: 合并结果.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
                   合并结果.ok ? 合并结果.说 : String(合并结果.原因 || '没合成'))
+              : null,
+            合并记录.length
+              ? h('div', { style: { marginTop: 6, marginLeft: 48 } },
+                  h('div', { style: { fontSize: 10.5, opacity: 0.4, marginBottom: 3 } }, '最近的合并（关掉面板也还在）'),
+                  合并记录.slice(0, 3).map((r, i) =>
+                    h('div', {
+                      key: i,
+                      style: {
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        fontSize: 11, lineHeight: 1.75, opacity: r.现状 && r.现状.齐了 ? 0.95 : 0.7,
+                        color: r.现状 && r.现状.齐了 ? 'rgba(158,232,180,0.95)' : r.原因 ? '#ff9b8a' : undefined,
+                      },
+                    },
+                      h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                        (r.现状 && r.现状.齐了 ? '✅ ' : r.派了 ? '⏳ ' : '◦ ') +
+                        String(r.目标 || '').split('\\').slice(-2).join('\\') +
+                        '｜' + ((r.现状 && r.现状.说) || ('日记 ' + ((r.现状 && r.现状.日记篇数) || 0) + ' 篇')) +
+                        (r.批 && r.批.总 ? '｜' + (r.批.已做 || 0) + '/' + r.批.总 + ' 批' : '') +
+                        (r.原因 ? '｜' + r.原因 : '')
+                      ),
+                      h('button', {
+                        onClick: () => 取消合并(r.目标),
+                        disabled: Boolean(取消着),
+                        title: '停掉这个合并会话，并删掉这条记录（目标文件夹不动）',
+                        style: {
+                          ...小按钮, padding: '2px 9px', fontSize: 10.5, flex: 'none',
+                          ...(取消着 ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+                        },
+                      }, 取消着 === r.目标 ? '停…' : '取消')
+                    )
+                  )
+                )
               : null,
             补
               ? h('div', { style: { marginTop: 10, fontSize: 11.5, lineHeight: 1.8, color: 补.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },

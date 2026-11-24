@@ -1422,10 +1422,20 @@ export function 算没跑完(文件夹) {
 
 /** 这个文件夹里有什么：记忆卡在不在、日记有哪几天、原始对话有哪几天 */
 export function 盘点档案(文件夹) {
-  const 出 = { 记忆卡: false, 日记: [], 原始对话: [] }
+  const 出 = { 记忆卡: false, 记忆卡文件: '', 日记: [], 原始对话: [] }
   try {
     if (!文件夹) return 出
-    出.记忆卡 = existsSync(join(文件夹, '记忆卡.md'))
+    // ⭐ 0.4.6：别只认死 `记忆卡.md` —— 别人会把记忆卡改名（`某人的记忆卡.md`），
+    //   认不出来的话合并会「记忆卡只有一份，跳过」，等于白合。
+    try {
+      const 们 = readdirSync(文件夹).filter(
+        (f) => /记忆卡.*\.md$/i.test(String(f)) && !/\.bak|\.旧|备份/i.test(String(f)),
+      )
+      出.记忆卡文件 = 们.sort()[0] || ''
+      出.记忆卡 = Boolean(出.记忆卡文件)
+    } catch (e) {}
+    if (!出.记忆卡) 出.记忆卡 = existsSync(join(文件夹, '记忆卡.md'))
+    if (!出.记忆卡文件 && 出.记忆卡) 出.记忆卡文件 = '记忆卡.md'
     const 收日 = (子) => {
       try {
         return [
@@ -1450,7 +1460,7 @@ export function 盘点档案(文件夹) {
  * 算出「怎么合」：同一天只有一份的直接搬，多份的交给 AI；记忆卡两份以上才合。
  * ⚠ 只算计划，不写任何文件。
  */
-export function 合并计划(文件夹们, 目标 = '') {
+export function 合并计划(文件夹们, 目标 = '', 选项 = {}) {
   const 源们 = (Array.isArray(文件夹们) ? 文件夹们 : []).filter(Boolean).map(String)
   if (!源们.length) return { ok: false, 原因: '至少选一个文件夹' }
   const 目标夹 = String(目标 || '')
@@ -1461,7 +1471,7 @@ export function 合并计划(文件夹们, 目标 = '') {
   const 卡们 = []
   for (const 夹 of 源们) {
     const 盘 = 盘点档案(夹)
-    if (盘.记忆卡) 卡们.push(夹)
+    if (盘.记忆卡) 卡们.push({ 夹, 文件: 盘.记忆卡文件 || '记忆卡.md' })
     for (const d of 盘.日记) {
       if (!天.has(d)) 天.set(d, [])
       天.get(d).push(夹)
@@ -1473,6 +1483,11 @@ export function 合并计划(文件夹们, 目标 = '') {
     if (夹们.length === 1) 只一份.push(日)
     else 要合.push({ 日, 来源: 夹们.slice() })
   }
+  // ⭐ 0.4.6：几份档案、每份上百篇的时候，一个会话读不完 —— 必须分批。
+  //   每批默认 12 天，做完一批再派下一批（不然它读到一半就开始糊）。
+  const 每批 = Math.max(1, Math.min(30, Number(选项.每批) || 12))
+  const 批次 = []
+  for (let i = 0; i < 要合.length; i += 每批) 批次.push(要合.slice(i, i + 每批))
   return {
     ok: true,
     源: 源们,
@@ -1480,6 +1495,8 @@ export function 合并计划(文件夹们, 目标 = '') {
     日记天数: 天.size,
     只一份,
     要合,
+    每批,
+    批次,
     记忆卡份数: 卡们.length,
     记忆卡要合: 卡们.length > 1,
     记忆卡来源: 卡们,
@@ -1493,17 +1510,31 @@ export function 合并计划(文件夹们, 目标 = '') {
  *   ⚠ 最关键的一行是「矛盾的两条都留着、不许自己判谁对」：
  *     合并最容易出的错不是漏，是**为了通顺自己挑一个**，还把那一条悄悄删掉。
  */
-export function 造合并提示词(计划, 目标夹) {
+export function 造合并提示词(计划, 目标夹, 选项 = null) {
   const p = 计划 || {}
   const 源 = Array.isArray(p.源) ? p.源 : []
   const 目 = String(目标夹 || p.目标 || '')
   const 名单 = 源.map((x, i) => '【来源 ' + (i + 1) + '】' + x).join('\n')
 
+  // ⭐ 0.4.6：第一句是**先验身份**。
+  //   实测：她会拿自己和伴侣的两份档案来试，那两份写的是**两个不同的人**，
+  //   AI 会老老实实把两边的日记揉成一篇 —— 那不是合并，是混档，还看不出来。
+  const 验人 = [
+    '**先验一件事，再做别的**：翻这几份档案里「我是谁」那一章（或者日记里第一人称指的是谁）。',
+    '如果它们写的是**两个不同的人**，停下来，只回这一句：',
+    '',
+    '> 这几份写的是不同的人，不能合并。',
+    '',
+    '然后**一个文件都不要写、一天都不要合**。只有确认是同一个人的多份档案，才往下做。',
+    '',
+  ].join('\n')
+
   const 记忆卡 = [
-    '你在合并档案。一共 ' + 源.length + ' 份来源：',
+    '你在合并记忆卡。一共 ' + 源.length + ' 份来源：',
     '',
     名单,
     '',
+    验人,
     '目标：合成一份新的记忆卡，写到 `' + join(目, '记忆卡.md') + '`。',
     '',
     '结构固定这八章，章名照抄，一个字都不许改：',
@@ -1520,7 +1551,7 @@ export function 造合并提示词(计划, 目标夹) {
     '1. **同一件事**几份都说到的，只留一条，选写得最完整的那份，不要几份都抄。',
     '2. **意思一样、说法不同**的（「她喜欢猫」和「她爱猫」），留一条，别凑两条。',
     '3. **互相矛盾**的（一份写「她不吃辣」、另一份写「她无辣不欢」），**两条都留着**，',
-    '   每条前面标 `⚠ 有分歧：`，后面注明来自哪一份。',
+    '   每条前面标 `⚠ 有分歧：`，后面注明来自哪几份。',
     '   **不许自己判断哪个对，也不许为了通顺把其中一条删掉。**',
     '4. **只有一份写到的**，原样搬过来，别删、别改写、别润色。',
     '5. **不许编造**。几份里都没有的话，一个字都不许加。',
@@ -1529,33 +1560,122 @@ export function 造合并提示词(计划, 目标夹) {
     '写之前先数一遍每章几条，超了就砍，再交。',
   ].join('\n')
 
-  const 只一份 = Array.isArray(p.只一份) ? p.只一份 : []
-  const 要合 = Array.isArray(p.要合) ? p.要合 : []
-  const 核对 = 要合.map((x) => '  ' + x.日 + '（来源：' + (x.来源 || []).join('、') + '）').join('\n')
+  // ⭐ 只列**这一批**要合的天。以前把几十上百个日期全塞进来：
+  //   一半是「原样复制」的（插件已经抄了，根本不用它管），把真正的规矩淹没了。
+  const 本批们 = Array.isArray(选项 && 选项.天们)
+    ? 选项.天们
+    : (Array.isArray(p.要合) ? p.要合 : [])
+  const 只一份数 = Array.isArray(p.只一份) ? p.只一份.length : 0
+  const 核对 = 本批们.map((x) => '  ' + x.日 + '（来源：' + (x.来源 || []).join('、') + '）').join('\n')
 
   const 日记 = [
     '你在合并日记。一共 ' + 源.length + ' 份来源：',
     '',
     名单,
     '',
-    '目标：写到 `' + join(目, '日记') + '\\` 下，一天一个 .md，文件名就用日期（如 `2026-11-10.md`）。',
+    验人,
+    '目标：写到 `' + join(目, '日记') + '` 下，一天一个 .md，文件名就用日期（如 `2026-11-10.md`）。',
     '',
-    '规矩：',
-    '1. **只有一份的那几天：原样复制过去，一个字都不许改**。',
-    '2. **有两份以上的那几天：合成一篇**',
-    '   - 保留每一份里**所有具体的事**（谁做了什么、说了什么原话）',
-    '   - 去掉重复的叙述，同一件事别写两遍',
-    '   - **不许美化、不许概括、不许加评论**',
-    '   - 同一件事两份写的日期不一样的，两个日期都标出来',
-    '3. 只写下面列出来的那些天，别自己加天。',
-    '',
-    '原样复制的日子：' + (只一份.length ? 只一份.join('、') : '（没有）'),
+    '**这一步只做下面这 ' + 本批们.length + ' 天**，别的天一律不要碰' +
+      (只一份数 ? '（其中 ' + 只一份数 + ' 天只有一份，插件已经抄好了，那些你不用管）' : '') + '。',
     '',
     '要合成的日子：',
     核对 || '（没有）',
+    '',
+    '规矩：',
+    '1. 每一天都把**所有来源**里那一天读一遍再动笔，别只看第一份。',
+    '2. 保留每一份里**所有具体的事**（谁做了什么、说了什么原话）。',
+    '3. 去掉重复的叙述，同一件事别写两遍。',
+    '4. **不许美化、不许概括、不许加评论。**',
+    '5. 同一件事两份写的日期不一样的，两个日期都标出来。',
+    '6. **目标文件夹里已经有这一天的，跳过、不要重做。**',
   ].join('\n')
 
-  return { 记忆卡, 日记, 目标: 目 }
+  return { 记忆卡, 日记, 验人, 目标: 目, 本批天数: 本批们.length }
+}
+
+/**
+ * ⭐ 0.4.6：合并任务落盘。
+ *   实测：面板一关，界面上那点合并信息就全没了，再进来什么都看不到。
+ *   而且合并是**异步**的（AI 要跑几分钟），得有个地方查它到底做完没有。
+ */
+const 合并记录路 = () => join(根目录, '合并任务.json')
+
+export function 读合并记录们() {
+  try {
+    const j = JSON.parse(readFileSync(合并记录路(), 'utf8'))
+    return Array.isArray(j) ? j : []
+  } catch (e) {
+    return []
+  }
+}
+
+export function 存合并记录(记) {
+  try {
+    if (!记 || !记.目标) return
+    mkdirSync(根目录, { recursive: true })
+    const 旧 = 读合并记录们().filter((x) => x && x.目标 && x.目标 !== 记.目标)
+    writeFileSync(合并记录路(), JSON.stringify([{ ...记, 更新: Date.now() }, ...旧].slice(0, 5), null, 2), 'utf8')
+  } catch (e) {}
+}
+
+/** ⭐ 0.4.6：删掉一条合并记录（取消时用；调用方负责先把会话停掉） */
+export function 删合并记录(目标) {
+  try {
+    const 目 = String(目标 || '')
+    if (!目) return { ok: false, 原因: '不知道删哪个' }
+    const 们 = 读合并记录们()
+    const 剩 = 们.filter((r) => !(r && String(r.目标 || '') === 目))
+    mkdirSync(根目录, { recursive: true })
+    writeFileSync(合并记录路(), JSON.stringify(剩, null, 2), 'utf8')
+    return { ok: true, 前: 们.length, 剩: 剩.length }
+  } catch (e) {
+    return { ok: false, 原因: String((e && e.message) || e) }
+  }
+}
+
+/** 合并到底做完没有：看目标文件夹里**实际有什么**，不看 AI 说了什么 */
+export function 合并进度(记) {
+  const 出 = { 记忆卡: false, 日记篇数: 0, 缺: [], 齐了: false, 说: '' }
+  try {
+    const 目 = String((记 && 记.目标) || '')
+    if (!目) return 出
+    出.记忆卡 = existsSync(join(目, '记忆卡.md'))
+    const 盘 = 盘点档案(目)
+    出.日记篇数 = 盘.日记.length
+    const 要 = Array.isArray(记.要合日) ? 记.要合日 : []
+    出.缺 = 要.filter((d) => !盘.日记.includes(d))
+    const 要卡 = Number(记.记忆卡 || 0) > 0
+    出.齐了 = 出.缺.length === 0 && (!要卡 || 出.记忆卡)
+    // 一句话进度，界面直接用
+    if (出.齐了) 出.说 = '合完了'
+    else {
+      const 差 = []
+      if (出.缺.length) 差.push('还差 ' + 出.缺.length + ' 天日记')
+      if (要卡 && !出.记忆卡) 差.push('记忆卡还没出')
+      出.说 = 差.join('，') || '还没开始'
+    }
+  } catch (e) {}
+  return 出
+}
+
+/**
+ * ⭐ 0.4.6：该不该给这个合并续下一批（纯函数，好测）。
+ *
+ *   ⚠ 三条边界都是踩出来的：
+ *     · 已经「齐了」就别再派 —— 判据只看目标文件夹里的文件；
+ *     · 重派到 3 次就停 —— 卡住的东西越重派越乱；
+ *     · 15 分钟才算「没动静」—— AI 读几十份料很慢，判急了一直重派，白花钱。
+ */
+export function 该续合并(记, 进度, 现在 = Date.now()) {
+  const r = 记 || {}
+  if (!r.派了 || r.完成 || r.取消了) return { 续: false, 因: '不归我管' }
+  if (进度 && 进度.齐了) return { 续: false, 因: '已经齐了' }
+  if (Number(r.重派 || 0) >= 3) return { 续: false, 因: '重派到顶' }
+  const 派于 = Number(r.本轮派出 || 0)
+  if (!派于) return { 续: false, 因: '还没计时' }
+  if (Number(现在) - 派于 < 15 * 60 * 1000) return { 续: false, 因: '还在跑' }
+  return { 续: true, 因: '15 分钟没动静' }
 }
 
 /** 把按天的料落成文本文件 */
@@ -3111,9 +3231,22 @@ export function apply(ctx, 配置 = {}) {
     const 日 = 今天串()
     const 夹们 = new Map()
     const 名们 = new Map()
+    // ⭐ 0.4.6：先取一次「能看见的会话」。绑定表里的会话也要过这一关 ——
+    //   以前只修了会话列表的过滤，绑定表里那些**星汐自己派出去的工人会话**照样被塞进来、
+    //   照样被定时派（群里那台绑了 6 个，全是工人）。看不见的一律不派。
+    let 可见 = null
+    try {
+      可见 = new Set(列会话(活会话们()).map((x) => String(x && x.id)))
+    } catch (e) {
+      可见 = null
+    }
     try {
       const 绑 = 读存配置().绑定 || {}
-      for (const [k, v] of Object.entries(绑)) if (k && v) 夹们.set(String(k), String(v))
+      for (const [k, v] of Object.entries(绑)) {
+        if (!k || !v) continue
+        if (可见 && !可见.has(String(k))) continue
+        夹们.set(String(k), String(v))
+      }
     } catch (e) {}
     try {
       for (const x of 列会话(活会话们())) {
@@ -3364,7 +3497,7 @@ export function apply(ctx, 配置 = {}) {
    *  · 记忆卡：文件夹根下名字里带「记忆卡」的 md（每个人起名不一样）
    *  · 日记：文件夹里「日记」子目录，取最近 N 个
    *  都找不到才退回「本机档案」的配置。
-   *  ⚠ 以前这里直接读全局配置的记忆卡路径，等于把大肥鱼那份塞给所有人。 */
+   *  ⚠ 以前这里直接读全局配置的记忆卡路径，等于把别人那份塞给所有人。 */
   const 本会话的档案 = (sid, 天 = 3) => {
     let 夹 = ''
     try {
@@ -3855,6 +3988,19 @@ export function apply(ctx, 配置 = {}) {
           '找源会话：' + 夹 + ' → ' + 最好 +
             '（还有 ' + 中.活 + ' 天没整理，读到 ' + 中.量 + ' 条，源最晚 ' + (中.最晚 || '—') + '，账本 ' + (已 || '开头') + '）',
         )
+        // ⭐ 0.4.6：账本跑到内容前面时，**这里就是唯一能看出来的地方**。
+        //   （群里那台卡了 12 天没人想明白，就是因为日志只说「还有 0 天」。）
+        try {
+          if (中.最晚 && 已) {
+            const 超 = 检测账本超前(夹, 中.最晚)
+            if (超.超前) {
+              记一笔(
+                '⚠ 账本超前：账本 ' + 超.账本 + '，可这个夹子里的内容只到 ' + 超.内容最晚 +
+                  '（差 ' + 超.差几天 + ' 天）。用「重拾 ' + 超.建议退到 + '」就能退回去。',
+              )
+            }
+          }
+        } catch (e) {}
         return 最好
       }
       记一笔('找源会话：' + 夹 + ' 没找到合适的源（绑定里有 ' + Object.keys(绑).length + ' 条，工人 ' + 工人们.size + ' 个）')
@@ -3886,8 +4032,11 @@ export function apply(ctx, 配置 = {}) {
     writeFileSync(路, JSON.stringify({ ...t, 已到: String(日), 完成: true, 截止: 0 }, null, 2), 'utf8')
   }
 
-  // 一批一天：料是**整段贴进消息**的，两天加起来可能十几万字，一天刚好
-  const 批天数 = 1
+  // ⭐ 0.4.6：一批做几天，改成可配（实测反馈：一次只做一天，会话开得太滥）。
+  //   料是**整段贴进消息**的，所以天数是硬上限，不是想多少就多少：
+  //   上限 7 —— 一天一份料，7 天连读带写一个会话刚好做得完；
+  //   再多它读到一半就开始糊（挑几天写、剩下的自己概括掉）。
+  const 批天数 = Math.max(1, Math.min(7, Number(读存配置().批天数) || 2))
   // 同一个文件夹两批之间至少隔这么久（一秒一批会把上下文和钱都烧掉；太久又会像卡住）
   const 节流毫秒 = 90 * 1000
   const 在跑 = new Map()   // 文件夹 → 开始时间
@@ -3949,7 +4098,9 @@ export function apply(ctx, 配置 = {}) {
     const 手动 = Boolean(选项.手动)
     // ⭐ 0.4.6：已经整理完的，别再来占定时的名额（群里那台就是一个完成的文件夹
     //   每分钟被派一次、每次都空、把别人的机会全吃掉了）。
-    if (旧任.完成 && !手动) {
+    // ⚠ 但**不能挡定时那一趟**：定时用的是「只今天」，同一个会话今天接着聊了内容，
+    //   `完成` 是昨天留下的，拦掉就等于「以后再也不整理了」。只拦「接着拾」那种续批。
+    if (旧任.完成 && !手动 && !选项.只今天) {
       return { ok: false, 原因: 停下说什么(旧任) }
     }
     if (旧任.暂停 && !手动) {
@@ -4607,7 +4758,308 @@ export function apply(ctx, 配置 = {}) {
   } catch (e) {
     记一笔('调度器挂不上：' + String((e && e.message) || e))
   }
+  // ═══════════════════════════════════════════════════════
+  // ⭐ 0.4.6：合并的核心 —— HTTP 路由和「自动续批」共用**同一份**代码。
+  //   ⚠ 不给自动续批单独写一套：两套逻辑迟早走偏（拾星那边就吃过这个亏）。
+  //   自动续批调它时传一个「假 res」，从里面把 JSON 捞出来。
+  // ═══════════════════════════════════════════════════════
+  const 处理合并 = async (源们, 目标, res) => {
+const 计 = 合并计划(源们, 目标)
+            if (!计.ok) return 回JSON(res, { ok: false, 原因: 计.原因 }, 400)
+            if (!计.日记天数 && !计.记忆卡份数) {
+              return 回JSON(res, { ok: false, 原因: '选中的文件夹里既没有日记也没有记忆卡' }, 400)
+            }
+            // ⚠ 0.4.6 实测漏的：建合并会话时没传 agentOptions，会话一起来就
+            //   `has no provider/model` 直接失败。模型按跟拾星同一套规矩取：
+            //   星坊里选了就听她的 → 没有就用主会话的默认模型。
+            let 模 = null
+            try {
+              const 存模 = 读存配置().模型
+              if (存模 && 存模.provider && 存模.model) 模 = 存模
+              else {
+                const 默认模 = typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : undefined
+                const d = 默认模 && typeof 默认模.currentSelection === 'function' ? 默认模.currentSelection() : null
+                if (d && d.provider && d.model) 模 = { provider: d.provider, model: d.model }
+              }
+            } catch (e) {}
+            try {
+              mkdirSync(join(目标, '日记'), { recursive: true })
+              mkdirSync(join(目标, '原始对话'), { recursive: true })
+            } catch (e) {
+              return 回JSON(res, { ok: false, 原因: '建不了目标文件夹：' + String((e && e.message) || e) }, 500)
+            }
+            // ① 只一份的日记：插件抄过去（不覆盖已有的）
+            const 抄了 = []
+            for (const 日 of 计.只一份) {
+              for (const 夹 of 计.源) {
+                const 路 = join(夹, '日记', 日 + '.md')
+                if (!existsSync(路)) continue
+                try {
+                  writeFileSync(join(目标, '日记', 日 + '.md'), readFileSync(路), { flag: 'wx' })
+                  抄了.push(日)
+                } catch (e) {}
+                break
+              }
+            }
+            // ② 原始对话：按天拼（原话一份都不许丢）
+            let 原文天数 = 0
+            try {
+              const 天们 = new Set()
+              for (const 夹 of 计.源) for (const d of 盘点档案(夹).原始对话) 天们.add(d)
+              for (const 日 of [...天们].sort()) {
+                const 块们 = []
+                for (const 夹 of 计.源) {
+                  const 路 = join(夹, '原始对话', 日 + '.txt')
+                  if (!existsSync(路)) continue
+                  const 文 = readFileSync(路, 'utf8')
+                  if (!文.trim()) continue
+                  块们.push(计.源.length > 1 ? '── 来自 ' + 夹 + ' ──' + String.fromCharCode(10) + 文 : 文)
+                }
+                if (!块们.length) continue
+                writeFileSync(join(目标, '原始对话', 日 + '.txt'), 块们.join(String.fromCharCode(10) + String.fromCharCode(10)), 'utf8')
+                原文天数++
+              }
+            } catch (e) {
+              记一笔('合并：拼原始对话出错 ' + String((e && e.message) || e))
+            }
+            // ③ 交给 AI：一批一批来。
+            //   ⭐ 0.4.6：几份档案、每份上百篇的时候，一个会话读不完 —— 必须分批。
+            //   日记按 12 天一批，记忆卡单独算最后一批（等日记都齐了再合）。
+            const 日批 = Array.isArray(计.批次) ? 计.批次 : []
+            const 卡要 = Boolean(计.记忆卡要合)
+            const 总批 = 日批.length + (卡要 ? 1 : 0)
+            const 记 = {
+              目标,
+              源: 计.源,
+              开始: Date.now(),
+              抄了: 抄了.length,
+              原文天数,
+              要合日记: 计.要合.length,
+              要合日: 计.要合.map((x) => x.日),
+              记忆卡: 计.记忆卡份数,
+              批: { 总: 总批, 日记批: 日批.length, 卡批: 卡要 ? 1 : 0 },
+              派了: false,
+              工作会话: '',
+            }
+            // 还没做完的批：日记批看目标里那几天齐没齐，记忆卡那批看文件在不在
+            const 目标已有 = 盘点档案(目标).日记
+            const 待做 = []
+            日批.forEach((天们, i) => {
+              const 缺 = 天们.filter((x) => !目标已有.includes(x.日))
+              if (缺.length) 待做.push({ 挖: '日记', 第: i, 天们: 缺 })
+            })
+            if (卡要 && !existsSync(join(目标, '记忆卡.md'))) 待做.push({ 挖: '卡', 第: 日批.length })
+            记.批.已做 = 总批 - 待做.length
+            记.批.还剩 = 待做.length
+            if (!待做.length) {
+              记一笔('合并：' + 目标 + '（日记全是一份、记忆卡只有一份，插件直接抄完了）')
+              记.完成 = true
+              记.说明 = '没有需要 AI 合并的部分，插件已经直接抄好了'
+              存合并记录(记)
+              return 回JSON(res, { ok: true, 合并: 记, 说明: 记.说明 })
+            }
+            // ⚠ **取不到模型就只做插件那一半**，别硬建一个跑不起来的会话
+            //   （0.4.6 实测：漏传 agentOptions，会话一起来就 `has no provider/model`）
+            if (!模 || !模.provider || !模.model) {
+              记.原因 = '取不到模型：星坊里没选，主会话也没有默认模型'
+              记.说明 = '只出现一天的日记和原始对话已经抄好了；要合的那部分需要模型——先去星坊里选一个再来'
+              存合并记录(记)
+              记一笔('合并：' + 目标 + ' 没派成（取不到模型）')
+              return 回JSON(res, { ok: false, 合并: 记, 原因: 记.原因, 说明: 记.说明 })
+            }
+            记.模型 = 模.provider + '/' + 模.model
+            const 这批 = 待做[0]
+            记.本轮 = 这批.挖 === '日记' ? '日记第 ' + (这批.第 + 1) + '/' + 日批.length + ' 批' : '记忆卡'
+            const 卡提示 = 造合并提示词(计, 目标, 这批.挖 === '日记' ? { 天们: 这批.天们 } : { 天们: [] })
+            const 提示 =
+              这批.挖 === '日记'
+                ? [
+                    '你在合并档案。**只写目标文件夹里的东西，源文件夹一个字节都不许改。**',
+                    '',
+                    '目标：`' + 目标 + '`',
+                    '（只有一份的日记、原始对话，插件已经帮你抄好了，你不用管；' +
+                      (日批.length > 1 ? '这次是分 ' + 日批.length + ' 批做的，这一批是第 ' + (这批.第 + 1) + ' 批。' : '') + '）',
+                    '',
+                    '【这一批只合日记，做完就交卷】',
+                    卡提示.日记,
+                    '',
+                    '做完回一句：这一批合了几天、有没有 `⚠` 之类要我看的地方。',
+                  ].join(String.fromCharCode(10))
+                : [
+                    '你在合并档案。**只写目标文件夹里的东西，源文件夹一个字节都不许改。**',
+                    '',
+                    '目标：`' + 目标 + '`',
+                    '（日记插件和前面几批已经全部做完了，你不用管）',
+                    '',
+                    '【这一批只合记忆卡，做完就交卷】',
+                    卡提示.记忆卡,
+                    '',
+                    '做完回一句：八章各几条、有没有 `⚠ 有分歧` 的条目。',
+                  ].join(String.fromCharCode(10))
+            let handle = null
+            const 会id = 'session-' + randomUUID()
+            try {
+              handle = await 代理服务.create({
+                sessionId: 会id,
+                meta: { cwd: 目标, agentPreset: 'standard' },
+                agentOptions: { provider: 模.provider, model: 模.model },
+              })
+            } catch (e) {
+              记.原因 = '新建合并会话失败：' + String((e && e.message) || e)
+              存合并记录(记)
+              return 回JSON(res, { ok: false, 原因: 记.原因, 合并: 记 }, 500)
+            }
+            记.派了 = true
+            记.工作会话 = 会id
+            // ⭐ 0.4.6：派工时刻记下来 —— 自动续批靠它算「这一批派出多久了」。
+            //   不记的话要等自动续批自己补记，会白等一轮（最多 60 秒）。
+            记.本轮派出 = Date.now()
+            记.重派 = 0
+            记.上次篇数 = 盘点档案(目标).日记.length
+            存合并记录(记)
+            const agent = handle && handle.agent
+            if (!agent || typeof agent.followup !== 'function') {
+              try {
+                handle?.dispose?.()
+              } catch {}
+              记.派了 = false
+              记.原因 = '合并会话没起来'
+              存合并记录(记)
+              return 回JSON(res, { ok: false, 原因: 记.原因, 合并: 记 }, 500)
+            }
+            try {
+              if (agent.session && 标题服务 && typeof 标题服务.rename === 'function') {
+                标题服务.rename(agent.session, '合并档案 · ' + 计.源.length + ' 份')
+              }
+            } catch {}
+            // 不等它跑完（可能要几分钟），先回话；结果进日志，前端可以再查
+            try {
+              await agent.followup({
+                id: randomUUID(),
+                role: 'user',
+                content: [{ type: 'text', text: 提示 }],
+                source: { kind: 'plugin:xingxi-merge' },
+              })
+            } catch (e) {
+              记一笔('合并：递话失败 ' + String((e && e.message) || e))
+            }
+            记一笔(
+              '合并：' + 计.源.length + ' 份 → ' + 目标 + '｜抄日记 ' + 抄了.length + ' 天，原文 ' +
+                原文天数 + ' 天，要 AI 合：日记 ' + 计.要合.length + ' 天（' + 日批.length + ' 批）/ 记忆卡 ' +
+                计.记忆卡份数 + ' 份｜这一轮派的是 ' + 记.本轮 + '，还剩 ' + 记.批.还剩 + ' 批',
+            )
+            return 回JSON(res, {
+              ok: true,
+              合并: 记,
+              说明:
+                '这一轮派的是' + 记.本轮 + '，' +
+                (记.批.还剩 > 1 ? '还剩 ' + (记.批.还剩 - 1) + ' 批，做完这一批再点一次「合并」接着来。' : '这是最后一批。'),
+            })
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // ⭐ 0.4.6：合并的「自动续批」—— 上一批做完就自动派下一批。
+  //
+  //   ⚠ 三件事必须守住（拾星那边踩过的）：
+  //     ① 只留一个调度器：插件重载过一次就会多挂一个，一分钟派好几个；
+  //     ② 有刹车：同一批最多重派 3 次，失败就不再硬来；
+  //     ③ 判断「做完了」看**目标文件夹里的文件**，不看会话自己在说什么。
+  // ═══════════════════════════════════════════════════════
+  let 查合并跑着 = false
+  const 查合并一轮 = async () => {
+    if (查合并跑着) return
+    查合并跑着 = true
+    try {
+      const 记们 = 读合并记录们()
+      for (const 记 of 记们) {
+        if (!记 || !记.派了 || 记.完成 || 记.取消了) continue
+        if (!Array.isArray(记.源) || !记.源.length || !记.目标) continue
+        const 进 = 合并进度(记)
+        if (进.齐了) {
+          记.完成 = true
+          记.派了 = false
+          记.说明 = '全部合完了'
+          存合并记录(记)
+          记一笔('合并自动：' + 记.目标 + ' 全部合完了')
+          continue
+        }
+        // 有新产出 → 说明它还在干活，把计时重置
+        const 现篇 = Number(进.日记篇数 || 0)
+        if (Number(记.上次篇数) !== 现篇) {
+          记.上次篇数 = 现篇
+          记.本轮派出 = Date.now()
+          存合并记录(记)
+          continue
+        }
+        // 还没开始计时（刚派出去）→ 记一笔时间就走
+        if (!Number(记.本轮派出 || 0)) {
+          记.本轮派出 = Date.now()
+          记.重派 = Number(记.重派 || 0)
+          存合并记录(记)
+          continue
+        }
+        // 15 分钟没动静才算卡住（AI 读几十份料很慢，判太急会重复派、白花钱）
+        const 判 = 该续合并(记, 进, Date.now())
+        if (!判.续) continue
+        // ⚠ 0.4.6 自审：派之前**重新读一次记录**。用户可能在遍历途中点了「取消」，
+        //   手里这份已经过期了 —— 不重读就会给一个已经取消的合并再派一个会话。
+        const 现记 = 读合并记录们().find((x) => x && String(x.目标 || '') === String(记.目标 || ''))
+        if (!现记 || 现记.取消了 || 现记.完成) continue
+        Object.assign(记, 现记)
+        if (Number(记.重派 || 0) >= 3) {
+          if (!记.卡住) {
+            记.卡住 = true
+            记.原因 = '同一批重派 3 次都没动静，停在这里了，点「重试」或「取消」'
+            存合并记录(记)
+            记一笔('合并自动：' + 记.目标 + ' 重派 3 次没动静，停下')
+          }
+          continue
+        }
+        记.重派 = Number(记.重派 || 0) + 1
+        记.本轮派出 = Date.now()
+        存合并记录(记)
+        记一笔('合并自动：' + 记.目标 + ' 上一批 15 分钟没动静，重派一次（第 ' + 记.重派 + ' 次）')
+        // 调的是**同一个** 处理合并，传一个假 res 把 JSON 捞出来
+        const 假 = { _码: 200, _体: '', writeHead(码) { this._码 = 码 }, end(体) { this._体 = String(体 || '') }, setHeader() {} }
+        try {
+          await 处理合并(记.源, 记.目标, 假)
+        } catch (e) {
+          记一笔('合并自动：重派出错 ' + String((e && e.message) || e))
+        }
+      }
+    } catch (e) {
+      记一笔('合并自动续批出错：' + String((e && e.message) || e))
+    } finally {
+      查合并跑着 = false
+    }
+  }
+  try {
+    // ⭐ 只留一个调度器（跟拾星那套同一个理由：重载会挂出好几个定时器）
+    const 停键 = Symbol.for('dsh-xingxi.合并调度停')
+    const 旧停 = globalThis[停键]
+    if (typeof 旧停 === 'function') {
+      try { 旧停() } catch {}
+    }
+    const 定时服务 = typeof ctx.get === 'function' ? ctx.get('timer') : undefined
+    let 停 = null
+    if (定时服务 && typeof 定时服务.repeat === 'function') {
+      const r = 定时服务.repeat(查合并一轮, 60 * 1000)
+      停 = typeof r === 'function' ? r : null
+    } else {
+      const t = setInterval(查合并一轮, 60 * 1000)
+      停 = () => clearInterval(t)
+    }
+    globalThis[停键] = 停
+    ctx.effect(() => () => {
+      try { if (typeof 停 === 'function') 停() } catch {}
+      if (globalThis[停键] === 停) globalThis[停键] = null
+    })
+    记一笔('合并调度器已挂（每 60 秒看一遍）')
+  } catch (e) {
+    记一笔('合并调度器挂不上：' + String((e && e.message) || e))
+  }
   ctx.effect(() =>
+
     ctx.webServer.register({
       kind: 'prefix',
 
@@ -4928,9 +5380,13 @@ export function apply(ctx, 配置 = {}) {
             if (!夹) return 回JSON(res, { ok: false, 原因: '这个会话还没有绑定文件夹' }, 400)
             const 前一天 = new Date(Date.parse(范围.从 + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10)
             // ① 账本：两个都退（只退日期不退水位 = 只截到当天尾巴，用户踩过）
+            //   ⚠ 0.4.6 自审：**没有账本的文件夹也能重拾**（新建的、或者从别处拷来的），
+            //     以前这里一律当失败返回，等于「新档案点重拾永远不行」。
             try {
               const 结 = 退回账本(夹, 前一天)
-              if (!结.ok) return 回JSON(res, { ok: false, 原因: '改不了账本：' + String(结.原因 || '') }, 500)
+              if (!结.ok && !/还没有账本/.test(String(结.原因 || ''))) {
+                return 回JSON(res, { ok: false, 原因: '改不了账本：' + String(结.原因 || '') }, 500)
+              }
             } catch (e) {
               return 回JSON(res, { ok: false, 原因: '改不了账本：' + String((e && e.message) || e) }, 500)
             }
@@ -4990,7 +5446,52 @@ export function apply(ctx, 配置 = {}) {
           //     · 多份的日记 + 记忆卡 —— 交给一个 AI 会话去合（这个必须模型来，去重要看语义）
           //
           //   ⚠ 原档一个字节都不许动（测试里有专门的快照对比盯着）。
-          if (径 === '/dsh-xingxi/合并' && req.method === 'POST') {
+          // ⭐ 0.4.6：合并的状态查询 —— 面板关掉再进来也要能看到（实测反馈）
+          if (径 === '/dsh-xingxi/合并状态') {
+            const 记录们 = 读合并记录们().map((r) => ({ ...r, 现状: 合并进度(r) }))
+            return 回JSON(res, { ok: true, 记录们 })
+          }
+          // ⭐ 0.4.6：取消一个合并 —— 跟拾星的「停止」一样：
+          //   先把正在跑的那个会话停掉，再把这行记录删掉。不然那条 ⏳ 会永远挂着。
+          //   ⚠ 只删记录、不删目标文件夹（里面可能已经有抄好的日记，删了可惜）。
+          if (径 === '/dsh-xingxi/合并取消' && req.method === 'POST') {
+            let 体 = ''
+            for await (const 块 of req) 体 += 块
+            let b = {}
+            try {
+              b = JSON.parse(体 || '{}')
+            } catch {}
+            const 目标 = String(b.目标 || b.to || '').trim()
+            if (!目标) return 回JSON(res, { ok: false, 原因: '不知道取消哪一个' }, 400)
+            const 们 = 读合并记录们()
+            const 这 = 们.find((r) => r && String(r.目标 || '') === 目标) || null
+            // ① 先把会话停掉
+            let 停了 = false
+            const 会 = String((这 && 这.工作会话) || '')
+            if (会) {
+              try {
+                const ag = 代理服务 && typeof 代理服务.get === 'function' ? 代理服务.get(会) : null
+                if (ag && typeof ag.dispose === 'function') {
+                  ag.dispose()
+                  停了 = true
+                }
+              } catch (e) {
+                记一笔('合并取消：停会话失败 ' + String((e && e.message) || e))
+              }
+            }
+            // ② 再删记录
+            const 删 = 删合并记录(目标)
+            if (!删.ok) return 回JSON(res, { ok: false, 原因: '删不掉记录：' + String(删.原因 || '') }, 500)
+            记一笔('合并取消：' + 目标 + '（会话' + (停了 ? '已停' : '本来就没在跑') + '，记录已删）')
+            return 回JSON(res, {
+              ok: true,
+              取消: { 目标, 停了 },
+              说明: 停了
+                ? '会话停了、记录删了。目标文件夹没动，里面已经抄好的东西还在，要清自己删。'
+                : '记录删了（那个会话本来就没在跑）。目标文件夹没动。',
+            })
+          }
+                    if (径 === '/dsh-xingxi/合并' && req.method === 'POST') {
             let 体 = ''
             for await (const 块 of req) 体 += 块
             let b = {}
@@ -5001,128 +5502,10 @@ export function apply(ctx, 配置 = {}) {
               .map((x) => String(x || ''))
               .filter(Boolean)
             const 目标 = String(b.目标 || b.to || '').trim() || join(档案根, '合并-' + 今天串())
-            const 计 = 合并计划(源们, 目标)
-            if (!计.ok) return 回JSON(res, { ok: false, 原因: 计.原因 }, 400)
-            if (!计.日记天数 && !计.记忆卡份数) {
-              return 回JSON(res, { ok: false, 原因: '选中的文件夹里既没有日记也没有记忆卡' }, 400)
-            }
-            try {
-              mkdirSync(join(目标, '日记'), { recursive: true })
-              mkdirSync(join(目标, '原始对话'), { recursive: true })
-            } catch (e) {
-              return 回JSON(res, { ok: false, 原因: '建不了目标文件夹：' + String((e && e.message) || e) }, 500)
-            }
-            // ① 只一份的日记：插件抄过去（不覆盖已有的）
-            const 抄了 = []
-            for (const 日 of 计.只一份) {
-              for (const 夹 of 计.源) {
-                const 路 = join(夹, '日记', 日 + '.md')
-                if (!existsSync(路)) continue
-                try {
-                  writeFileSync(join(目标, '日记', 日 + '.md'), readFileSync(路), { flag: 'wx' })
-                  抄了.push(日)
-                } catch (e) {}
-                break
-              }
-            }
-            // ② 原始对话：按天拼（原话一份都不许丢）
-            let 原文天数 = 0
-            try {
-              const 天们 = new Set()
-              for (const 夹 of 计.源) for (const d of 盘点档案(夹).原始对话) 天们.add(d)
-              for (const 日 of [...天们].sort()) {
-                const 块们 = []
-                for (const 夹 of 计.源) {
-                  const 路 = join(夹, '原始对话', 日 + '.txt')
-                  if (!existsSync(路)) continue
-                  const 文 = readFileSync(路, 'utf8')
-                  if (!文.trim()) continue
-                  块们.push(计.源.length > 1 ? '── 来自 ' + 夹 + ' ──' + String.fromCharCode(10) + 文 : 文)
-                }
-                if (!块们.length) continue
-                writeFileSync(join(目标, '原始对话', 日 + '.txt'), 块们.join(String.fromCharCode(10) + String.fromCharCode(10)), 'utf8')
-                原文天数++
-              }
-            } catch (e) {
-              记一笔('合并：拼原始对话出错 ' + String((e && e.message) || e))
-            }
-            // ③ 交给 AI：合多份日记 + 合记忆卡
-            const 要合日记 = 计.要合.length > 0
-            const 要合卡 = Boolean(计.记忆卡要合)
-            if (!要合日记 && !要合卡) {
-              记一笔('合并：' + 目标 + '（日记全是一份、记忆卡只有一份，插件直接抄完了）')
-              return 回JSON(res, {
-                ok: true,
-                合并: { 目标, 抄了: 抄了.length, 原文天数, 要合日记: 0, 记忆卡: 计.记忆卡份数, 派了: false },
-                说明: '这次没有需要 AI 合并的部分，插件已经直接抄好了',
-              })
-            }
-            const 卡提示 = 造合并提示词(计, 目标)
-            const 提示 = [
-              '你在合并档案。**只写目标文件夹里的东西，源文件夹一个字节都不许改。**',
-              '',
-              '目标：`' + 目标 + '`',
-              '（只有一份的日记、原始对话，插件已经帮你抄好了，你不用管）',
-              '',
-              '要做两件事，第一件做完再做第二件：',
-              '',
-              要合日记 ? '【第一件 · 合日记】' + String.fromCharCode(10) + 卡提示.日记 : '【第一件 · 合日记】这次没有要合的日记，跳过。',
-              '',
-              要合卡 ? '【第二件 · 合记忆卡】' + String.fromCharCode(10) + 卡提示.记忆卡 : '【第二件 · 合记忆卡】记忆卡只有一份，跳过。',
-              '',
-              '做完回一句：日记合了几天、记忆卡八章各几条、有没有 `⚠ 有分歧` 的条目。',
-            ].join(String.fromCharCode(10))
-            let handle = null
-            try {
-              handle = await 代理服务.create({
-                sessionId: 'session-' + randomUUID(),
-                meta: { cwd: 目标, agentPreset: 'standard' },
-              })
-            } catch (e) {
-              return 回JSON(res, { ok: false, 原因: '新建合并会话失败：' + String((e && e.message) || e) }, 500)
-            }
-            const agent = handle && handle.agent
-            if (!agent || typeof agent.followup !== 'function') {
-              try {
-                handle?.dispose?.()
-              } catch {}
-              return 回JSON(res, { ok: false, 原因: '合并会话没起来' }, 500)
-            }
-            try {
-              if (agent.session && 标题服务 && typeof 标题服务.rename === 'function') {
-                标题服务.rename(agent.session, '合并档案 · ' + 计.源.length + ' 份')
-              }
-            } catch {}
-            // 不等它跑完（可能要几分钟），先回话；结果进日志，前端可以再查
-            try {
-              await agent.followup({
-                id: randomUUID(),
-                role: 'user',
-                content: [{ type: 'text', text: 提示 }],
-                source: { kind: 'plugin:xingxi-merge' },
-              })
-            } catch (e) {
-              记一笔('合并：递话失败 ' + String((e && e.message) || e))
-            }
-            记一笔(
-              '合并：' + 计.源.length + ' 份 → ' + 目标 + '｜抄日记 ' + 抄了.length + ' 天，原文 ' +
-                原文天数 + ' 天，要 AI 合：日记 ' + 计.要合.length + ' 天 / 记忆卡 ' + 计.记忆卡份数 + ' 份',
-            )
-            return 回JSON(res, {
-              ok: true,
-              合并: {
-                目标,
-                抄了: 抄了.length,
-                原文天数,
-                要合日记: 计.要合.length,
-                要合日: 计.要合.map((x) => x.日),
-                记忆卡: 计.记忆卡份数,
-                派了: true,
-              },
-              说明: '日记里只有一份的已经抄好了；多份的和记忆卡交给一个会话在合，可以过几分钟去看目标文件夹',
-            })
+            await 处理合并(源们, 目标, res)
           }
-          if (径 === '/dsh-xingxi/定时' && req.method === 'POST') {
+
+if (径 === '/dsh-xingxi/定时' && req.method === 'POST') {
             let 体 = ''
             for await (const 块 of req) 体 += 块
             try {
@@ -5188,6 +5571,22 @@ export function apply(ctx, 配置 = {}) {
             return 回JSON(res, { ok: true })
           }
 
+          // ⭐ 0.4.6：一批做几天（1~7）。实测反馈：一次只做一天，会话开得太滥。
+          if (径 === '/dsh-xingxi/批天数') {
+            if (req.method === 'POST') {
+              let 体 = ''
+              for await (const 块 of req) 体 += 块
+              let b = {}
+              try {
+                b = JSON.parse(体 || '{}')
+              } catch {}
+              const n = Math.max(1, Math.min(7, Number(b.天数) || 2))
+              存配置({ 批天数: n })
+              记一笔('批天数改成 ' + n + ' 天')
+              return 回JSON(res, { ok: true, 批天数: n })
+            }
+            return 回JSON(res, { ok: true, 批天数: Math.max(1, Math.min(7, Number(读存配置().批天数) || 2)) })
+          }
           if (径 === '/dsh-xingxi/config' && req.method === 'POST') {
             let 体 = ''
             for await (const 块 of req) 体 += 块

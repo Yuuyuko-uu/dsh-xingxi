@@ -185,3 +185,60 @@ test('证据：报告里那几个会话的 id，一个都不许写进产物', ()
     for (const c of 线索) assert.equal(文.includes(c), false, 名 + ' 里漏了一个别人的会话 id')
   }
 })
+
+// ═══════════════════════════════════════════════════
+// ④ 修完之后自审出来的三处（0.4.6 二次复查）
+// ═══════════════════════════════════════════════════
+test('自审：「完成」的拦截不能挡定时那一趟（否则以后再也不整理）', () => {
+  const 源 = fs.readFileSync(path.join(根, 'index.js'), 'utf8')
+  const 起 = 源.indexOf('旧任.完成 && !手动')
+  assert.ok(起 > 0, '找不到那条拦截')
+  const 行 = 源.slice(起, 起 + 120)
+  assert.match(行, /只今天/, '拦「完成」时没放过「只今天」—— 同一个会话今天接着聊的东西永远进不来')
+})
+
+test('自审：定时那一轮的绑定表也要过一遍「看得见吗」', () => {
+  const 源 = fs.readFileSync(path.join(根, 'index.js'), 'utf8')
+  const 起 = 源.indexOf('const 查定时一轮 = async () => {')
+  assert.ok(起 > 0, '找不到查定时一轮')
+  const 段 = 源.slice(起, 起 + 1600)
+  assert.match(段, /可见/, '查定时里没有「可见」这层，绑定表里的工人会话照样会被派')
+  assert.match(段, /!可见\.has/, '没有把看不见的绑会话挡掉')
+  // 顺序：先算可见，再拿它筛绑定表
+  const 算 = 段.indexOf('可见 = new Set')
+  const 筛 = 段.indexOf('!可见.has')
+  assert.ok(算 > 0 && 筛 > 算, '先筛后算，等于没筛')
+})
+
+test('自审：找源会话的日志里要报「账本超前」', () => {
+  const 源 = fs.readFileSync(path.join(根, 'index.js'), 'utf8')
+  const 起 = 源.indexOf("'找源会话：' + 夹 + ' → '")
+  assert.ok(起 > 0, '找不到那条日志')
+  const 段 = 源.slice(起, 起 + 1400)
+  assert.match(段, /账本超前/, '日志里不报账本超前，下一个人还得查 12 天')
+  assert.match(段, /检测账本超前\(/, '没有真的去调用检测')
+  assert.match(段, /建议退到|重拾/, '没有告诉他怎么救')
+})
+
+test('自审：没有账本的文件夹也要能重拾（新档案、从别处拷来的）', () => {
+  const 源 = fs.readFileSync(path.join(根, 'index.js'), 'utf8')
+  const 起 = 源.indexOf("径 === '/dsh-xingxi/重拾'")
+  assert.ok(起 > 0, '找不到重拾路由')
+  const 段 = 源.slice(起, 起 + 1600)
+  assert.match(段, /还没有账本/, '没账本时没放过，重拾会直接失败')
+})
+
+test('退回账本：真跑一遍（退到哪天、水位归零、备份里是旧值）', () => {
+  const 夹 = 造(path.join(临时家, '退回实跑'))
+  const 账路 = path.join(夹, '.xingxi.json')
+  fs.writeFileSync(账路, JSON.stringify({ 已整理到: '2026-11-23', 已到: 999 }), 'utf8')
+  const 结 = 模.退回账本(夹, '2026-11-16')
+  assert.equal(结.ok, true)
+  const 新 = JSON.parse(fs.readFileSync(账路, 'utf8'))
+  assert.equal(新.已整理到, '2026-11-16')
+  assert.equal(新.已到, 0, '水位没归零，那天前半段还是进不来')
+  const bak = fs.readdirSync(夹).filter((f) => f.includes('.bak-'))[0]
+  const 旧 = JSON.parse(fs.readFileSync(path.join(夹, bak), 'utf8'))
+  assert.equal(旧.已整理到, '2026-11-23', '备份里应该是退回前的值')
+  assert.equal(旧.已到, 999)
+})
