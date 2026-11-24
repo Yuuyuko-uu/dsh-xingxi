@@ -1533,6 +1533,10 @@ window.__ModuleLoader__.load({
       const [重拾日, 设重拾日] = useState('')
       const [重拾着, 设重拾着] = useState(false)
       const [重拾结果, 设重拾结果] = useState(null)
+      // ⭐ 0.4.6：合并档案（老大实报：三份档案想合回去，记忆卡会打架）
+      const [合并源, 设合并源] = useState('')
+      const [合并着, 设合并着] = useState(false)
+      const [合并结果, 设合并结果] = useState(null)
       // ⭐ 0.2.2 停止：把这一批掐掉，并且不让调度器再派
       const [停着, 设停着] = useState(false)
       const 停止 = async () => {
@@ -1551,12 +1555,13 @@ window.__ModuleLoader__.load({
         }
       }
       // ⭐ 0.2.2 补星：只给「已整理到的那一天」补水位之后的尾巴
-      // ⭐ 0.4.5（0.4.4 实测反馈 #2）：显式「重拾某一天」—— 不用再手改内部 json。
+      // ⭐ 0.4.6：「重拾」现在认一天，也认一段（2026-11-10~2026-11-12）。
+      //   校验交给宿主（它才有那个解析规则），这里只挡空值。
   const 重拾 = async () => {
     if (!会话 || !会话.id) return
     const 日 = String(重拾日 || '').trim()
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(日)) {
-      设重拾结果({ ok: false, 原因: '日期写成 2026-11-21 这种' })
+    if (!日) {
+      设重拾结果({ ok: false, 原因: '填一天（2026-11-21）或者一段（2026-11-10~2026-11-12）' })
       return
     }
     设重拾着(true)
@@ -1569,12 +1574,54 @@ window.__ModuleLoader__.load({
       })
       const j = await r.json().catch(() => ({}))
       设重拾结果(j.ok
-        ? { ok: true, 说: '已重派 ' + 日 + '（账本退到 ' + ((j.重拾 && j.重拾.前一天) || '前一天') + '）' }
+        ? {
+            ok: true,
+            说: '已重派 ' + ((j.重拾 && j.重拾.天数 > 1)
+              ? (j.重拾.从 + ' ~ ' + j.重拾.到 + '（' + j.重拾.天数 + ' 天）')
+              : 日) + '（账本退到 ' + ((j.重拾 && j.重拾.前一天) || '前一天') + '）',
+          }
         : { ok: false, 原因: j.原因 || ('HTTP ' + r.status) })
     } catch (e) {
       设重拾结果({ ok: false, 原因: String((e && e.message) || e) })
     } finally {
       设重拾着(false)
+    }
+  }
+  // ⭐ 0.4.6：合并档案。源文件夹一行一个（或者用分号隔开），目标由插件自动新建。
+  const 合并 = async () => {
+    const 源 = String(合并源 || '')
+      .split(/[;\n\r]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (源.length < 2) {
+      设合并结果({ ok: false, 原因: '至少填两个文件夹（一行一个，或者用分号隔开）' })
+      return
+    }
+    设合并着(true)
+    设合并结果(null)
+    try {
+      const r = await fetch('/dsh-xingxi/合并', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ 源 }),
+      })
+      const j = await r.json().catch(() => ({}))
+      if (!j.ok) {
+        设合并结果({ ok: false, 原因: j.原因 || ('HTTP ' + r.status) })
+      } else {
+        const m = j.合并 || {}
+        设合并结果({
+          ok: true,
+          说:
+            '合到 ' + (m.目标 || '新文件夹') +
+            '：抄了 ' + (m.抄了 || 0) + ' 天日记、' + (m.原文天数 || 0) + ' 天原文' +
+            (m.派了 ? '；多份的日记（' + (m.要合日记 || 0) + ' 天）和记忆卡交给一个会话在合，过几分钟去看' : '；没有需要 AI 合的部分'),
+        })
+      }
+    } catch (e) {
+      设合并结果({ ok: false, 原因: String((e && e.message) || e) })
+    } finally {
+      设合并着(false)
     }
   }
   const 开始补 = async () => {
@@ -1676,16 +1723,17 @@ window.__ModuleLoader__.load({
               }, 停着 ? '停着…' : '停止'),
               h('span', { style: { fontSize: 11, opacity: 0.35, lineHeight: 1.6 } },
                 跑着 ? '在切料、开新会话' : 会话 && !会话.有 ? '还没有档案，拾完就有了' : '会新开一个会话，让它一天一天往下做')),
-            // ⭐ 0.4.5（0.4.4 实测反馈 #2）：重拾某一天 —— 当天拾早了（后半天的没进去）时用这个
+            // ⭐ 0.4.6：从「重拾某一天」扩成「重拾一段」——
+            //   先拾了新会话、水位推到最新之后，旧的窗口就永远补不进来（老大实报）。
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } },
-              h('span', { style: { fontSize: 11, opacity: 0.5, flex: 'none' } }, '重拾某一天'),
+              h('span', { style: { fontSize: 11, opacity: 0.5, flex: 'none' } }, '重拾'),
               h('input', {
                 value: 重拾日,
-                placeholder: '2026-11-21',
+                placeholder: '2026-11-21  或  2026-11-10~2026-11-12',
                 spellCheck: false,
                 onChange: (e) => 设重拾日(e.target.value),
                 style: {
-                  width: 108, fontSize: 11.5, padding: '5px 8px', borderRadius: 7,
+                  width: 218, fontSize: 11.5, padding: '5px 8px', borderRadius: 7,
                   background: 'rgba(8,13,24,0.6)', color: '#e0eaff',
                   border: '1px solid rgba(157,185,240,0.18)', outline: 'none', fontFamily: 'inherit',
                 },
@@ -1704,6 +1752,33 @@ window.__ModuleLoader__.load({
             重拾结果
               ? h('div', { style: { marginTop: 8, fontSize: 11.5, lineHeight: 1.8, color: 重拾结果.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
                   重拾结果.ok ? 重拾结果.说 : String(重拾结果.原因 || '没重拾成'))
+              : null,
+            // ⭐ 0.4.6：合并档案 —— 换过文件夹、各自整理过，最后想合成一份
+            h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 12 } },
+              h('span', { style: { fontSize: 11, opacity: 0.5, flex: 'none', paddingTop: 6 } }, '合并档案'),
+              h('textarea', {
+                value: 合并源,
+                placeholder: '一份档案一行，至少两行\nD:\\...\\档案A\nD:\\...\\档案B',
+                rows: 2,
+                spellCheck: false,
+                onChange: (e) => 设合并源(e.target.value),
+                style: {
+                  flex: 1, minWidth: 0, fontSize: 11.5, padding: '5px 8px', borderRadius: 7, resize: 'vertical',
+                  background: 'rgba(8,13,24,0.6)', color: '#e0eaff',
+                  border: '1px solid rgba(157,185,240,0.18)', outline: 'none', fontFamily: 'inherit',
+                },
+              }),
+              h('button', {
+                onClick: 合并,
+                disabled: 合并着,
+                style: { ...小按钮, padding: '5px 12px', fontSize: 11.5, flex: 'none', ...(合并着 ? { opacity: 0.4, cursor: 'not-allowed' } : {}) },
+              }, 合并着 ? '合并中…' : '合并'),
+            ),
+            h('div', { style: { fontSize: 10.5, opacity: 0.32, lineHeight: 1.6, marginTop: 4, marginLeft: 48 } },
+              '只出现一天的日记直接抄过去；同一天有好几份的、还有记忆卡，交给一个会话去合。原档案一个字节都不动。'),
+            合并结果
+              ? h('div', { style: { marginTop: 6, fontSize: 11.5, lineHeight: 1.8, color: 合并结果.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
+                  合并结果.ok ? 合并结果.说 : String(合并结果.原因 || '没合成'))
               : null,
             补
               ? h('div', { style: { marginTop: 10, fontSize: 11.5, lineHeight: 1.8, color: 补.ok ? 'rgba(158,208,255,0.9)' : '#ff9b8a' } },
