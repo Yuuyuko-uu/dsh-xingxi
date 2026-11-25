@@ -1461,7 +1461,58 @@ window.__ModuleLoader__.load({
             h('i', { style: { width: 9, height: 9, borderRadius: 99, background: 开着 ? '#d8fff1' : '#c2ccdd', boxShadow: 开着 ? '0 0 8px rgba(171,255,224,0.52)' : '0 1px 3px rgba(0,0,0,0.25)' } })),
           开着 ? '开' : '关')
       const 小字 = { fontSize: 10.5, lineHeight: 1.75, color: 'rgba(187,205,235,0.4)' }
+      // 两套提示词共用同一个输入框样式（现在只有「日记提示词」一个框在用）
+      const 提示词框 = {
+        width: '100%', boxSizing: 'border-box', fontSize: 11.5, lineHeight: 1.75,
+        padding: '8px 10px', borderRadius: 8, resize: 'vertical', height: 168,
+        background: 'rgba(8,13,24,0.5)', color: '#e0eaff',
+        border: '1px solid rgba(157,185,240,0.12)', outline: 'none', fontFamily: 'inherit',
+      }
 
+      // ⭐ 0.4.7：日记提示词（整段可改）—— 动态部分用占位符
+      //   ⚠ 这几行必须定义在「定时卡」**之前**（卡片里要用），否则 const 暂时性死区
+      const [日记提示词, 设日记提示词] = useState('')
+      const [默认提示词, 设默认提示词] = useState('')
+      const [用着默认, 设用着默认] = useState(true)
+      const [提示词存着, 设提示词存着] = useState(false)
+      const [提示词存好了, 设提示词存好了] = useState(false)
+      useEffect(() => {
+        let 活 = true
+        fetch('/dsh-xingxi/日记提示词')
+          .then((r) => r.json())
+          .then((j) => {
+            if (!活 || !j || !j.ok) return
+            设默认提示词(String(j.默认 || ''))
+            设日记提示词(String(j.提示词 || '') || String(j.默认 || ''))
+            设用着默认(Boolean(j.是默认))
+          })
+          .catch(() => {})
+        return () => { 活 = false }
+      }, [])
+      const 存日记提示词 = async (文) => {
+        if (提示词存着) return
+        设提示词存着(true)
+        try {
+          // 跟默认一字不差就存空串，等于「用默认」—— 以后默认改进了它能跟着变
+          const 要存 = String(文 || '').trim() === String(默认提示词 || '').trim() ? '' : String(文 || '')
+          const r = await fetch('/dsh-xingxi/日记提示词', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ 提示词: 要存 }),
+          })
+          const j = await r.json().catch(() => ({}))
+          if (j.ok) {
+            设用着默认(!要存.trim())
+            设提示词存好了(true)
+            setTimeout(() => 设提示词存好了(false), 1600)
+          }
+        } catch (e) {
+        } finally {
+          设提示词存着(false)
+        }
+      }
+      // ⚠ 星汐那半边的提示词不做成可改（2026-11-25 定）——
+      //   它管着交卷格式（<<<文件 …>>>），改坏了收卷会失败，收益远小于风险。
       const 定时卡 = 卡('定时', '到点自动整理这个会话的记忆卡和日记', [
         h('div', { style: { ...行式, borderTop: 'none', paddingTop: 2 } },
           h('span', { style: 标式 }, '几点'),
@@ -1486,9 +1537,38 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...行式, justifyContent: 'space-between' } },
           h('span', { style: { ...标式, whiteSpace: 'nowrap' } }, '让星汐拾星'),
           开关(定设 && 定设.星汐, () => 存定({ 星汐: !(定设 && 定设.星汐) }))),
-        // 分隔线只留一条，放在小字上面
-        h('div', { style: { height: 1, background: 'rgba(160,185,235,0.09)', margin: '4px 0 11px' } }),
-        h('div', { style: { ...小字, paddingTop: 9 } },
+        // ⭐ 0.4.7：日记提示词（「让她自己写」那一套；星汐那半边的保持内置不可改）
+        h('div', { style: { height: 1, background: 'rgba(160,185,235,0.09)', margin: '10px 0 0' } }),
+        h('div', { style: { paddingTop: 11 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } },
+            h('span', { style: { fontSize: 11, opacity: 0.55, flex: 'none' } }, '日记提示词'),
+            提示词存着
+              ? h('span', { style: { fontSize: 10, opacity: 0.4, flex: 'none' } }, '保存中…')
+              : 提示词存好了
+                ? h('span', { style: { fontSize: 10, flex: 'none', color: 'rgba(150,220,170,0.9)' } }, '已保存')
+                : null,
+            h('span', { style: { flex: 1 } }),
+            h('button', {
+              onClick: () => { 设日记提示词(默认提示词); 存日记提示词(默认提示词) },
+              style: { ...小按钮, padding: '2px 9px', fontSize: 10, flex: 'none' },
+            }, '用默认'),
+          ),
+          h('textarea', {
+            value: 日记提示词,
+            rows: 12,
+            spellCheck: false,
+            onChange: (e) => 设日记提示词(e.target.value),
+            onBlur: (e) => 存日记提示词(e.target.value),
+            style: 提示词框,
+          }),
+          h('div', { style: { fontSize: 10, opacity: 0.3, marginTop: 5, lineHeight: 1.7 } },
+            '这是「让她自己写」时发给它的话。{日记} {记忆卡} {日期} 会自动换成实际路径。',
+            h('br'),
+            '凭记忆写，不给原始对话；星汐另开会话那套不用改，一直用内置的。'),
+        ),
+        // 分隔线只留一条，说明放卡片最下面
+        h('div', { style: { height: 1, background: 'rgba(160,185,235,0.09)', margin: '12px 0 11px' } }),
+        h('div', { style: { ...小字, paddingTop: 0 } },
           '让会话自己拾星：到点提醒这个会话，它自己写记忆卡和日记。',
           h('br'),
           '让星汐拾星：星汐另开一个会话，把记忆卡和日记一起写。',
