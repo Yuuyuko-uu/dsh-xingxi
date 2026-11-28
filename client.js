@@ -2010,8 +2010,38 @@ window.__ModuleLoader__.load({
     }
 
     // ═══════════════════════════════════════════════════
+    // 2026-11-11（用户要求 A）：同一档案目录下的多条会话（拾星工人）归成一组
+    function 按目录分组(会话们) {
+      const 组 = new Map()
+      for (const s of 会话们 || []) {
+        const 键 = (s && s.目录) ? String(s.目录) : ('__单__' + (s && s.id))
+        if (!组.has(键)) 组.set(键, [])
+        组.get(键).push(s)
+      }
+      const 出 = []
+      for (const [键, 列] of 组) {
+        列.sort((a, b) => {
+          const a工 = /^拾星 ·/.test((a && a.名) || '') ? 1 : 0
+          const b工 = /^拾星 ·/.test((b && b.名) || '') ? 1 : 0
+          return a工 - b工
+        })
+        出.push({ 键, 主: 列[0], 列 })
+      }
+      return 出
+    }
+    function 显示会话行(会话们, 展开组) {
+      const 出 = []
+      for (const g of 按目录分组(会话们)) {
+        const 多 = g.列.length > 1
+        const 开 = !!(展开组 && 展开组[g.键])
+        出.push({ s: g.主, 组头: 多, 条数: g.列.length, 组键: g.键, 展开: 开 })
+        if (多 && 开) for (const s of g.列.slice(1)) 出.push({ s, 子: true })
+      }
+      return 出
+    }
     function 星汐() {
       const [会话们, 设会话们] = useState([])
+      const [展开组, 设展开组] = useState({})
       const [当前, 设当前] = useState('')
       const [图, 设图] = useState(null)
       const [页, 设页] = useState('图')
@@ -2230,11 +2260,12 @@ window.__ModuleLoader__.load({
             会话们.length === 0
               ? h('div', { style: { fontSize: 11.5, opacity: 0.35, padding: '4px 12px', lineHeight: 1.7 } },
                   '还没有档案。在 ~/.dsh/xingxi/会话/<会话id>/ 里放 .md 就有星了。')
-              : 会话们.map((s) =>
-                  h('div', {
+              : 显示会话行(会话们, 展开组).map((行) => {
+                  const s = 行.s
+                  return h('div', {
                     key: s.id,
                     'data-xingxi-session': s.id,
-                    title: '长按拖动调整会话顺序',
+                    title: 行.子 ? '同一个档案里的拾星会话' : '长按拖动调整会话顺序',
                     onPointerDown: (e) => 会话指针按下(e, s.id),
                     onPointerMove: 会话指针移动,
                     onPointerUp: 会话指针结束,
@@ -2250,14 +2281,14 @@ window.__ModuleLoader__.load({
                       设页('图')
                     },
                     style: {
-                      padding: '8px 10px',
-                      margin: '3px 8px',
+                      padding: 行.子 ? '6px 10px 6px 18px' : '8px 10px',
+                      margin: 行.子 ? '2px 8px 2px 26px' : '3px 8px',
                       borderRadius: 9,
                       cursor: 拖会话 === s.id ? 'grabbing' : 'grab',
                       touchAction: 'pan-y', userSelect: 'none',
-                      opacity: 拖会话 === s.id ? 0.5 : 1,
+                      opacity: 拖会话 === s.id ? 0.5 : (行.子 ? 0.7 : 1),
                       transform: 拖会话 === s.id ? 'scale(0.985)' : 'none',
-                      background: 当前 === s.id ? 'linear-gradient(110deg, rgba(87,132,207,0.2), rgba(107,87,181,0.11))' : 'rgba(140,170,230,0.018)',
+                      background: 当前 === s.id ? 'linear-gradient(110deg, rgba(87,132,207,0.2), rgba(107,87,181,0.11))' : (行.子 ? 'rgba(140,170,230,0.008)' : 'rgba(140,170,230,0.018)'),
                       border: '1px solid ' + (放置会话 === s.id && 拖会话 && 拖会话 !== s.id ? 'rgba(170,202,255,0.42)' : 当前 === s.id ? 'rgba(159,189,245,0.12)' : 'transparent'),
                       boxShadow: 放置会话 === s.id && 拖会话 && 拖会话 !== s.id ? 'inset 0 0 0 1px rgba(170,202,255,0.12)' : 'none',
                       transition: 'background .16s ease, border-color .16s ease, opacity .16s ease, transform .16s ease',
@@ -2265,20 +2296,37 @@ window.__ModuleLoader__.load({
                   },
                     h('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
                       h('i', { style: {
-                        width: 6, height: 6, borderRadius: 99, flex: 'none',
+                        width: 行.子 ? 5 : 6, height: 行.子 ? 5 : 6, borderRadius: 99, flex: 'none',
                         background: s.有 ? '#9ed0ff' : 'rgba(150,170,210,0.35)',
                       } }),
-                      h('span', { style: { fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.名),
-                      // ⭐ 0.1.6：DSH 侧栏里那栏「未分组」的会话（不属于任何工作区）
+                      h('span', { style: { fontSize: 行.子 ? 11.5 : 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.名),
                       s.未分组
                         ? h('span', { style: { flex: 'none', fontSize: 9.5, padding: '1px 5px', borderRadius: 6, background: 'rgba(150,170,210,0.12)', color: 'rgba(186,205,236,0.55)' } }, '未分组')
                         : null,
+                      行.组头
+                        ? h('span', { onPointerDown: (e) => { e.stopPropagation(); 设展开组((旧) => { const 新 = { ...旧 }; 新[行.组键] = !旧[行.组键]; return 新 }) }, onClick: (e) => { e.stopPropagation() }, title: 行.展开 ? '收起' : '展开', style: { flex: 'none', fontSize: 9.5, padding: '3px 6px', borderRadius: 6, background: 'rgba(120,160,220,0.12)', color: 'rgba(186,205,236,0.55)', cursor: 'pointer' } }, String(行.条数) + ' 条')
+                        : null,
+                      行.组头
+                        ? h('span', {
+                            title: 行.展开 ? '收起同一档案的拾星会话' : '展开同一档案的拾星会话',
+                            onPointerDown: (e) => {
+                              e.stopPropagation()
+                              设展开组((旧) => {
+                                const 新 = { ...旧 }
+                                新[行.组键] = !旧[行.组键]
+                                return 新
+                              })
+                            },
+                            onClick: (e) => { e.stopPropagation() },
+                            style: { flex: 'none', width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, lineHeight: 1, opacity: 0.6, cursor: 'pointer', padding: 0, borderRadius: 5 },
+                          }, 行.展开 ? '▾' : '▸')
+                        : null,
                       h('span', { 'aria-hidden': true, style: { flex: 'none', fontSize: 12, letterSpacing: -2, opacity: 拖会话 === s.id ? 0.78 : 0.23, color: 'rgba(198,216,247,0.8)', cursor: 'grab', transition: 'opacity .15s ease' } }, '⠿')),
 
-                    h('div', { style: { fontSize: 10.5, opacity: 0.34, marginLeft: 13 } },
+                    h('div', { style: { fontSize: 行.子 ? 9.5 : 10.5, opacity: 0.34, marginLeft: 13 } },
                       s.有 ? 说重(s.字) : '未绑定文件夹'),
-                  ),
-                )),
+                  )
+                })),
         ),
       )
     }
